@@ -211,6 +211,13 @@ def test_wrap_spans_preserves_styles_across_lines():
     assert ("tail", "cyan") in lines[2]
 
 
+def test_wrap_spans_glues_the_chip_seam():
+    # the lane chip's ▏ hugs the first word — the donor's append_text seam
+    # (audit finding 2: a naive word-join inserted a cell here)
+    lines = panes.wrap_spans([("∅ ▏", "dim"), ("hello there", "")], width=40)
+    assert flat(lines[0]) == "∅ ▏hello there"
+
+
 def test_selection_range_clamps_and_orders():
     assert panes.selection_range(0, None, 0) is None
     assert panes.selection_range(2, None, 5) == (2, 2)

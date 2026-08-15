@@ -141,6 +141,7 @@ class CorrectionWindow(QMainWindow):
         self.stage = "select"
         self._graph_cap = "cjm-capability-graph-sqlite"
         self._sources: List[Tuple[str, str]] = []
+        self._discovered = False   # discovery landed — the picker may paint
         self._status: Dict[str, Dict[str, int]] = {}
         self._purposes: Dict[str, Dict[str, int]] = {}
         self._datasets: List[Dict[str, Any]] = []
@@ -261,7 +262,7 @@ class CorrectionWindow(QMainWindow):
     def _render(self) -> None:
         width, height = self._cells()
         if self.stage == "select":
-            if not self._sources and not self._status:
+            if not self._discovered:
                 return   # boot ladder still running — keep the loading status
             self.cards.setHtml(panes.lines_to_html(panes.picker_lines(self, width)))
             self._paint_status(panes.picker_status(self))
@@ -324,6 +325,7 @@ class CorrectionWindow(QMainWindow):
             return
         self._status = res["status"]
         self._purposes = res["purposes"]
+        self._discovered = True
         self.cursor = 0
         self._render()
 
@@ -565,6 +567,13 @@ class CorrectionWindow(QMainWindow):
             return
         status = res.get("status")
         play = res.get("play")
+        if status and res.get("status_first"):
+            # The donor's insert ordering: status painted BEFORE the play, so
+            # the ticker claims the fresh line and the ▶ readout stays live
+            # (every other play-then-status gesture leaves its status the
+            # winner — the nudge ⏱ contract).
+            self._paint_status(status)
+            status = None
         if play:
             kind = play[0]
             if kind == "cursor":
@@ -573,7 +582,7 @@ class CorrectionWindow(QMainWindow):
                 _, start_s, end_s, note = play
                 self._play_span_source(start_s, end_s, note=note)
             elif kind == "chunk_tail":
-                c = self.view.chunk(self.cursor)
+                c = self.view.chunk(play[1])   # the NUDGED segment, not the live cursor
                 if c is None:
                     self.player.stop()
                 else:
@@ -658,7 +667,7 @@ class CorrectionWindow(QMainWindow):
         QMediaPlayer file-span playback (the ffmpeg decode retires)."""
         path = self.view.source_path
         if not path or not Path(path).exists():
-            self._paint_status(f"span audio: source media not found "
+            self._paint_status(f"insert audio: source media not found "
                                f"({path or 'no path on Source'})")
             return
         self.player.play_span(path, start_s, end_s, rate=self.speed)
@@ -760,7 +769,11 @@ class CorrectionWindow(QMainWindow):
         if self._nudge_busy:
             return
         self._nudge_busy = True
-        self._submit_gesture(self._do_nudge(edge, sign))
+        try:
+            self._submit_gesture(self._do_nudge(edge, sign))
+        except Exception:
+            self._nudge_busy = False   # a submit that never runs must not latch
+            raise
 
     async def _do_nudge(self, edge: str, sign: int):
         """,/. (cursor END) and </> (cursor START): nudge a boundary TIME by
@@ -813,7 +826,11 @@ class CorrectionWindow(QMainWindow):
         if self._shift_busy or now - self._last_shift < self._shift_floor:
             return   # busy commit OR inside the paint-rate floor — drop the repeat
         self._shift_busy = True
-        self._submit_gesture(self._do_shift(direction))
+        try:
+            self._submit_gesture(self._do_shift(direction))
+        except Exception:
+            self._shift_busy = False   # a submit that never runs must not latch
+            raise
 
     async def _do_shift(self, direction: str):
         """One ←/→ press: move ONE word across the boundary after the cursor
@@ -1415,6 +1432,7 @@ class CorrectionWindow(QMainWindow):
                               f"{plan['start_s']:.2f}s — grow it with ,/. </>"}
         return {"status": f"⊕ inserted{lab} {plan['start_s']:.2f}"
                           f"–{plan['end_s']:.2f}s · playing source · e types its text",
+                "status_first": True,
                 "play": ("span", plan["start_s"], plan["end_s"], "")}
 
     async def _do_submit_insert(self, raw: str):

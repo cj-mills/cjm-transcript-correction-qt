@@ -16,6 +16,7 @@ shell measures its font once (QFontMetrics) and asks for (width, height) in
 cells. The pin never moves; the spine flows past it."""
 
 import html as _html
+import re as _re
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_transcript_correction_tui.spine import segment_word_tokens
@@ -121,31 +122,39 @@ def _stylize(line: Line, extra: str) -> Line:
 
 
 def wrap_spans(spans: Line, width: int) -> List[Line]:
-    """Word-wrap styled spans at a cell width (the Textual Text.wrap stand-in:
-    greedy word fill, styles ride their words; single spaces separate)."""
-    words: List[Span] = []
+    """Word-wrap styled spans at a cell width (the Textual Text.wrap stand-in):
+    breaks land only at whitespace, adjacent spans WITHOUT a space between
+    them stay glued (the lane chip's `▏` hugs the first word, the donor's
+    append_text seam), internal space runs are preserved, and the space at a
+    fold point is dropped."""
+    groups: List[Tuple[Line, bool]] = []   # (styled fragment run, is_space)
     for text, style in spans:
-        parts = text.split(" ")
-        for i, w in enumerate(parts):
-            if w:
-                words.append((w, style))
-    if not words:
-        return [list(spans)] if spans else [[]]
+        for part in _re.findall(r"\S+|\s+", text):
+            if part.isspace():
+                groups.append(([(part, style)], True))
+            elif groups and not groups[-1][1]:
+                groups[-1][0].append((part, style))   # glue across the span seam
+            else:
+                groups.append(([(part, style)], False))
+    if not groups:
+        return [[]]
     lines: List[Line] = []
     cur: Line = []
     cur_w = 0
-    for w, style in words:
-        need = len(w) + (1 if cur else 0)
-        if cur and cur_w + need > width:
+    for frag, is_space in groups:
+        w = sum(len(t) for t, _ in frag)
+        if not is_space and cur and cur_w + w > width:
+            while cur and cur[-1][0].isspace():   # the fold eats the separator
+                cur_w -= len(cur.pop()[0])
             lines.append(cur)
             cur, cur_w = [], 0
-            need = len(w)
-        if cur:
-            cur.append((" ", ""))
-        cur.append((w, style))
-        cur_w += need
-    if cur:
-        lines.append(cur)
+        if is_space and not cur:
+            continue   # no leading space on a folded line
+        cur.extend(frag)
+        cur_w += w
+    while cur and cur[-1][0].isspace():
+        cur_w -= len(cur.pop()[0])
+    lines.append(cur)
     return lines
 
 
