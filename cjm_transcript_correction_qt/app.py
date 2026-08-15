@@ -188,9 +188,22 @@ class CorrectionWindow(QMainWindow):
         self._state_saved = 0.0
         self._build_widgets()
         self._build_key_table()
+        self._wheel_accum = 0
         self._ticker = QTimer(self)
         self._ticker.setInterval(100)
         self._ticker.timeout.connect(self._tick)
+        # Autoplay DEBOUNCE (drive-1 field find, a named divergence from the
+        # donor's immediate-play: that contract was priced against
+        # ChunkPlayer's single persistent PortAudio stream, where churn was a
+        # buffer swap. QMediaPlayer restarts the FFmpeg pipeline into the
+        # sink per play, and a navigation-speed storm of stream starts
+        # DISTORTS THE PIPEWIRE SINK DEVICE-WIDE until it reconnects. So
+        # navigation stops audio at once and only the SETTLED segment plays;
+        # r / speed steps / gesture replays stay immediate.)
+        self._autoplay_timer = QTimer(self)
+        self._autoplay_timer.setSingleShot(True)
+        self._autoplay_timer.setInterval(150)
+        self._autoplay_timer.timeout.connect(self._play_cursor)
         self.stack_opened.connect(self._on_stack_opened)
         self.sources_listed.connect(self._on_sources_listed)
         self.statuses_done.connect(self._on_statuses_done)
@@ -247,7 +260,17 @@ class CorrectionWindow(QMainWindow):
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self.cards.viewport() and event.type() == QEvent.Wheel:
-            self._move(1 if event.angleDelta().y() < 0 else -1)
+            # One cursor move per 120-unit wheel NOTCH (drive-1 field find:
+            # high-resolution wheels emit several sub-notch events per detent,
+            # and a per-event move both broke the wheel-moves-1 contract
+            # (2bc3bd6b) and amplified the autoplay churn storm).
+            self._wheel_accum += event.angleDelta().y()
+            while self._wheel_accum >= 120:
+                self._wheel_accum -= 120
+                self._move(-1)
+            while self._wheel_accum <= -120:
+                self._wheel_accum += 120
+                self._move(1)
             return True
         return super().eventFilter(obj, event)
 
@@ -730,7 +753,12 @@ class CorrectionWindow(QMainWindow):
             self._state_saved = now
         self._render()
         if self.autoplay:
-            self._play_cursor()
+            # stale audio must not ride the new focus; the debounced timer
+            # plays the segment the walk SETTLES on (see __init__)
+            if self.player is not None:
+                self.player.stop()
+            self._stop_ticker()
+            self._autoplay_timer.start()
 
     def _jump_glyph(self, direction: int, ids: set, what: str) -> None:
         view = self.view
@@ -2133,6 +2161,7 @@ class CorrectionWindow(QMainWindow):
             self._overlay_pick = None
             self._render()
         else:
+            self._autoplay_timer.stop()   # esc also cancels a pending debounced play
             if self.player is not None:
                 self.player.stop()
             self._stop_ticker()
@@ -2141,6 +2170,7 @@ class CorrectionWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         """ANY exit path: sidecar bookmark, audio down, seat + loop torn down
         blocking (the Textual action_quit_app contract)."""
+        self._autoplay_timer.stop()
         if self.view is not None:
             save_tui_state(self._graph_db_path, self.view.source_id,
                            self.cursor, speed=self.speed)
