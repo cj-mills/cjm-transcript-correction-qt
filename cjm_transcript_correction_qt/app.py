@@ -54,12 +54,10 @@ from cjm_transcript_correction_tui.spine import (match_sources, neighbor_word_bo
                                                  plan_chunk_split, plan_gate, plan_time_nudge,
                                                  resolve_mark_class_token, segment_word_tokens,
                                                  snap_word_span)
-from cjm_transcript_correction_tui.state import (load_tui_state, save_tui_state,
-                                                 selector_for_spine)
+from cjm_transcript_correction_tui.state import load_tui_state, save_tui_state, selector_for_spine
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QFontDatabase, QGuiApplication
-from PySide6.QtWidgets import (QLabel, QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import QLabel, QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout, QWidget
 
 from . import panes
 from .player import SpanPlayer

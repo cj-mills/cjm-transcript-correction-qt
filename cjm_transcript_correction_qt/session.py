@@ -19,13 +19,12 @@ only): testable headless, openers injectable."""
 
 import asyncio
 from concurrent.futures import Future
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from cjm_substrate_qt_kit.loopthread import LoopThreadSession
 from cjm_transcript_correction_core.graph import (list_source_spines, list_speaker_entities,
                                                   session_purposes_by_source, start_session)
-from cjm_transcript_correction_tui.spine import (list_sources, open_stack, source_status,
-                                                 SpineView)
+from cjm_transcript_correction_tui.spine import list_sources, open_stack, source_status, SpineView
 
 
 class CorrectionShellSession(LoopThreadSession):
