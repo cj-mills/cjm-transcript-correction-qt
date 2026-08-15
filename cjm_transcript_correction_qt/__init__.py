@@ -8,4 +8,4 @@ decode paths ride SpanPlayer/QMediaPlayer (model-input WAV chunk spans and
 original-media source spans — the sounddevice/WSOLA/ffmpeg-pipe stack
 retires on this lane). Born on-graph."""
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"

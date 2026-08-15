@@ -15,17 +15,28 @@ setPosition+play to mediaStatusChanged when the source is fresh (an already-
 loaded source replays immediately); positionChanged stops at the span end
 (backend-granular — a sub-100ms overshoot, inaudible at these spans)."""
 
-from typing import Optional
+import time
+from typing import Optional, Tuple
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 _READY = (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia,
           QMediaPlayer.EndOfMedia)
 
+# Minimum seconds between actual play STARTS (drive-1 field find, held-r
+# variant): every QMediaPlayer stop()->play() tears down and recreates the
+# sink stream — same source or not — and a key-repeat storm of restarts
+# wedges the PipeWire node DEVICE-WIDE until it reconnects. Requests inside
+# the gap coalesce (latest wins, audio stops at once) and play when the
+# burst settles, so a held replay goes quiet and sounds once on release.
+_MIN_START_GAP_S = 0.25
+
 
 class SpanPlayer:
-    """Play/stop one file span at a time; replay gestures re-enter, escape stops."""
+    """Play/stop one file span at a time; replay gestures re-enter, escape
+    stops. Play starts are rate-limited at this choke point — EVERY caller
+    (replay, autoplay, auditions, gesture replays) rides the same guard."""
 
     def __init__(self, parent=None):
         self._player = QMediaPlayer(parent)
@@ -36,6 +47,11 @@ class SpanPlayer:
         self._start_ms = 0
         self._end_ms: Optional[int] = None
         self._pending = False
+        self._last_start = 0.0
+        self._req: Optional[Tuple[str, float, float, float]] = None
+        self._req_timer = QTimer(self._player)
+        self._req_timer.setSingleShot(True)
+        self._req_timer.timeout.connect(self._flush_req)
 
     @property
     def playing(self) -> bool:
@@ -43,11 +59,27 @@ class SpanPlayer:
 
     def play_span(self, path: str, start_s: float, end_s: float,
                   rate: float = 1.0) -> None:
-        """Start `path` at start_s, stopping at end_s (file-local seconds —
+        """Request `path` at start_s, stopping at end_s (file-local seconds —
         source-coordinate seconds ARE file-local on the original media).
 
-        Stop-then-play always: stale audio under a fresh focus would mismatch
-        the card on screen (the SegmentPlayer contract, span edition)."""
+        An idle request starts immediately; inside the start gap it coalesces
+        (see _MIN_START_GAP_S). Stop-then-play always: stale audio under a
+        fresh focus would mismatch the card on screen."""
+        if time.monotonic() - self._last_start < _MIN_START_GAP_S:
+            self._req = (path, start_s, end_s, rate)
+            self._player.stop()
+            self._req_timer.start(int(_MIN_START_GAP_S * 1000))
+            return
+        self._start_span(path, start_s, end_s, rate)
+
+    def _flush_req(self) -> None:
+        if self._req is not None:
+            req, self._req = self._req, None
+            self._start_span(*req)
+
+    def _start_span(self, path: str, start_s: float, end_s: float,
+                    rate: float) -> None:
+        self._last_start = time.monotonic()
         self._player.stop()
         self._start_ms = max(0, int(start_s * 1000))
         self._end_ms = int(end_s * 1000)
@@ -75,6 +107,8 @@ class SpanPlayer:
 
     def stop(self) -> None:
         self._pending = False
+        self._req = None            # an explicit stop cancels a coalesced request
+        self._req_timer.stop()
         self._end_ms = None
         self._player.stop()
 
