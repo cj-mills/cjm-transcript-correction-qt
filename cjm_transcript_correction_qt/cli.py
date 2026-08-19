@@ -7,6 +7,7 @@ middle differs; there is no hand-off tail on this lane (quit = sidecar save
 
 import sys
 
+from cjm_substrate_qt_kit.theme import apply_theme
 from cjm_transcript_correction_tui.cli import build_parser, resolve_settings
 from PySide6.QtWidgets import QApplication
 
@@ -20,6 +21,7 @@ def main() -> int:  # Console-script entry point (cjm-transcript-correction-qt)
     args = parser.parse_args()
     s = resolve_settings(args)
     qapp = QApplication(sys.argv[:1])
+    apply_theme(qapp)
     win = CorrectionWindow(args.graph_db_path, source=args.source,
                            manifests_dir=s["manifests_dir"],
                            rendition=args.rendition,

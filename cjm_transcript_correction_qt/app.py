@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.journal import sidecar_journal_path
 from cjm_substrate.core.workspace import resolve_workspace
+from cjm_substrate_qt_kit.theme import make_font
 from cjm_transcript_correction_core.cli import run_extract
 from cjm_transcript_correction_core.graph import (commit_boundary_shift_correction,
                                                   commit_chunk_insert_correction,
@@ -56,7 +57,7 @@ from cjm_transcript_correction_tui.spine import (match_sources, neighbor_word_bo
                                                  snap_word_span)
 from cjm_transcript_correction_tui.state import load_tui_state, save_tui_state, selector_for_spine
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QFontDatabase, QGuiApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QLabel, QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout, QWidget
 
 from . import panes
@@ -230,7 +231,7 @@ class CorrectionWindow(QMainWindow):
         self.cards.setFocusPolicy(Qt.NoFocus)
         self.cards.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.cards.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.cards.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        self.cards.setFont(make_font(kind="mono"))
         self.cards.viewport().installEventFilter(self)
         self.editor = QLineEdit()
         self.editor.setVisible(False)
