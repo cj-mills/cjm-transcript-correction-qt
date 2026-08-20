@@ -47,9 +47,13 @@ from cjm_transcript_correction_core.graph import (commit_boundary_shift_correcti
                                                   commit_text_correction,
                                                   commit_time_nudge_correction,
                                                   fa_words_for_transcript)
-from cjm_transcript_correction_core.models import (RECOMMENDED_INSERT_LABELS,
+from cjm_transcript_correction_core.models import (ANNOTATE_LANE_ACTIONS, ANNOTATE_ONLY_ACTIONS,
+                                                   ASSIGN_LANE_ACTIONS, ASSIGN_ONLY_ACTIONS,
+                                                   NUDGE_STEPS_MS, NUDGE_TAIL_S,
+                                                   PROPOSE_LANE_ACTIONS, PROPOSE_ONLY_ACTIONS,
+                                                   RECOMMENDED_INSERT_LABELS,
                                                    RECOMMENDED_MARK_CLASSES,
-                                                   RECOMMENDED_OVERLAY_LABELS)
+                                                   RECOMMENDED_OVERLAY_LABELS, SPEEDS)
 from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_bound,
                                                   parse_entity_input, parse_mark_input,
                                                   plan_boundary_shift, plan_chunk_insert,
@@ -63,39 +67,6 @@ from PySide6.QtWidgets import QLabel, QLineEdit, QMainWindow, QTextBrowser, QVBo
 
 from . import panes
 from .session import CorrectionShellSession
-
-# Constants copied from CorrectionApp (stranded as Textual App class
-# attributes — captured roadmap item, DEC 0f11683d).
-SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0)
-NUDGE_STEPS_MS = (1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0)
-NUDGE_TAIL_S = 2.0
-
-ASSIGN_LANE_ACTIONS = frozenset({
-    "next", "prev", "replay", "seam_next", "seam_prev", "speed_down", "speed_up",
-    "yank", "assign_pick", "assign_same", "assign_new", "assign_accept",
-    "cycle_lane", "cycle_lane_prev", "cancel", "quit_app"})
-ASSIGN_ONLY_ACTIONS = frozenset({"assign_pick", "assign_same", "assign_new",
-                                 "assign_accept"})
-PROPOSE_LANE_ACTIONS = frozenset({
-    "next", "prev", "replay", "seam_next", "seam_prev", "speed_down", "speed_up",
-    "yank", "nudge_end_earlier", "nudge_end_later", "nudge_start_earlier",
-    "nudge_start_later", "nudge_step_down", "nudge_step_up",
-    "insert_chunk", "insert_labeled", "relabel_insert", "remove_insert", "edit",
-    "propose_accept", "propose_next", "propose_prev", "propose_audition",
-    "toggle_tier2", "cycle_lane", "cycle_lane_prev", "cancel", "quit_app"})
-PROPOSE_ONLY_ACTIONS = frozenset({"propose_accept", "propose_next", "propose_prev",
-                                  "propose_audition", "toggle_tier2"})
-ANNOTATE_LANE_ACTIONS = frozenset({
-    "next", "prev", "replay", "seam_next", "seam_prev", "speed_down", "speed_up",
-    "yank", "word_left", "word_right", "word_select", "annotate_quick",
-    "annotate_pick", "annotate_editor", "annotate_audition", "overlay_remove",
-    "overlay_nudge", "overlay_cycle", "nudge_step_down", "nudge_step_up",
-    "next_overlay", "prev_overlay", "toggle_wordless_fold",
-    "cycle_lane", "cycle_lane_prev", "cancel", "quit_app"})
-ANNOTATE_ONLY_ACTIONS = frozenset({
-    "word_left", "word_right", "word_select", "annotate_quick", "annotate_pick",
-    "annotate_editor", "annotate_audition", "overlay_remove", "overlay_nudge",
-    "overlay_cycle", "next_overlay", "prev_overlay"})
 
 _KEYNAMES = {Qt.Key_Up: "up", Qt.Key_Down: "down", Qt.Key_Left: "left",
              Qt.Key_Right: "right", Qt.Key_Tab: "tab", Qt.Key_Backtab: "shift+tab",

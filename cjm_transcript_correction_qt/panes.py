@@ -19,17 +19,11 @@ import html as _html
 import re as _re
 from typing import Any, Dict, List, Optional, Tuple
 
+from cjm_transcript_correction_core.models import WORDLESS_INSERT_LABELS
 from cjm_transcript_correction_core.spine import segment_word_tokens
 
 Span = Tuple[str, str]
 Line = List[Span]
-
-# Copied from CorrectionApp.WORDLESS_INSERT_LABELS (stranded as a Textual App
-# class attribute — importing it would drag Textual into the Qt process; the
-# duplication is a captured roadmap item, DEC 0f11683d).
-WORDLESS_INSERT_LABELS = {"inhale", "empty", "throat-clear", "background-noise",
-                          "click", "background-music", "background-voices", "echo",
-                          "wheeze", "chuckle"}
 
 _COLORS = {"red": "#c74a3c", "yellow": "#b9770e", "cyan": "#2b8a9d",
            "magenta": "#9b59b6", "green": "#3f9d55", "blue": "#4a6fb5",
