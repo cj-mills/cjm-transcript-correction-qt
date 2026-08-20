@@ -1,6 +1,7 @@
 """Console-script driver for the Qt shell: the SAME argument surface and
-resolution ladder as cjm-transcript-correction-tui — build_parser and
-resolve_settings imported from it (DEC 0f11683d), so the two shells cannot
+resolution ladder as every correction shell — build_parser and
+resolve_settings imported from cjm_transcript_correction_core.launch (DEC
+0f11683d; absorbed there by spine absorption 12f342f1), so the shells cannot
 drift on which stack a correction session opens. Only the window in the
 middle differs; there is no hand-off tail on this lane (quit = sidecar save
 + teardown, the donor's exit contract)."""
@@ -8,7 +9,7 @@ middle differs; there is no hand-off tail on this lane (quit = sidecar save
 import sys
 
 from cjm_substrate_qt_kit.theme import apply_theme
-from cjm_transcript_correction_tui.cli import build_parser, resolve_settings
+from cjm_transcript_correction_core.launch import build_parser, resolve_settings
 from PySide6.QtWidgets import QApplication
 
 from .app import CorrectionWindow

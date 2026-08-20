@@ -6,11 +6,10 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 
 ## Modules
 
-- **`cjm_transcript_correction_qt`** — Qt shell for the transcript-correction workbench — a DIRECT PORT of
+- **`cjm_transcript_correction_qt.__init__`** — Qt shell for the transcript-correction workbench — a DIRECT PORT of
 - **`cjm_transcript_correction_qt.app`** — The Qt correction workbench: the same center-pinned segment walk, lane
 - **`cjm_transcript_correction_qt.cli`** — Console-script driver for the Qt shell: the SAME argument surface and
 - **`cjm_transcript_correction_qt.panes`** — Pure paint builders for the correction Qt shell — the Textual paint logic,
-- **`cjm_transcript_correction_qt.player`** — Span playback via QMediaPlayer — the Qt lane's audio answer (DEC dcf8a712,
 - **`cjm_transcript_correction_qt.session`** — The correction shell's jobs seam: graph stack + JobQueue + the SpineView
 
 ## API
@@ -44,14 +43,10 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 - `wordless_insert` _function_ — A certified-wordless inserted chunk: wordless CLASS and empty text
 - `wrap_spans` _function_ — Word-wrap styled spans at a cell width (the Textual Text.wrap stand-in):
 
-### `cjm_transcript_correction_qt.player`
-
-- `SpanPlayer` _class_ — Play/stop one file span at a time; replay gestures re-enter, escape stops.
-
 ### `cjm_transcript_correction_qt.session`
 
 - `CorrectionShellSession` _class_ — The loop-thread seat for the correction shell.
 
 ## Dependencies
 
-**Depends on:** `PySide6`, `cjm-substrate`, `cjm-substrate-qt-kit`, `cjm-substrate-tui-kit`, `cjm-transcript-correction-core`, `cjm-transcript-correction-tui`
+**Depends on:** `PySide6`, `cjm-substrate`, `cjm-substrate-qt-kit`, `cjm-transcript-correction-core`

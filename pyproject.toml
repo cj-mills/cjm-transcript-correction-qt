@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cjm-transcript-correction-qt"
-version = "0.0.3"
+version = "0.0.4"
 description = "Qt shell for the transcript-correction workbench — the third workflow TUI on the PySide6 lane (DEC c4b0d6e5, a direct port): the same center-pinned segment walk, multi-lane vocabulary, commit-then-echo gestures, and sidecar view state as cjm-transcript-correction-tui, whose pure spine/state modules and CLI ladder it imports; the graph stack and SpineView seat run behind a private asyncio loop thread, and both audio decode paths ride SpanPlayer/QMediaPlayer. Born on-graph."
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 authors = [{name = "Christian J. Mills", email = "9126128+cj-mills@users.noreply.github.com"}]
 classifiers = ["Programming Language :: Python :: 3", "Programming Language :: Python :: 3 :: Only"]
-dependencies = ['cjm-transcript-correction-tui>=0.0.4', 'cjm-transcript-correction-core>=0.0.5', 'cjm-substrate>=0.0.60', 'cjm-substrate-tui-kit>=0.0.2', 'cjm-substrate-qt-kit>=0.0.1', 'PySide6']
+dependencies = ['cjm-transcript-correction-core>=0.0.6', 'cjm-substrate>=0.0.61', 'cjm-substrate-qt-kit>=0.0.3', 'PySide6']
 
 [project.scripts]
 cjm-transcript-correction-qt = "cjm_transcript_correction_qt.cli:main"

@@ -19,7 +19,7 @@ import html as _html
 import re as _re
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_transcript_correction_tui.spine import segment_word_tokens
+from cjm_transcript_correction_core.spine import segment_word_tokens
 
 Span = Tuple[str, str]
 Line = List[Span]
@@ -416,7 +416,7 @@ def picker_status(s: Any) -> str:
 
 def spine_picker_lines(s: Any, width: int) -> List[Line]:
     """The spine picker (DEC f1024568): one row per coexisting SKELETON."""
-    from cjm_transcript_correction_tui.state import spine_label
+    from cjm_transcript_correction_core.state import spine_label
     _, title = s._spine_source or ("", "")
     lines: List[Line] = [[]]
     header: Line = [("  ", ""), (title or "source", "bold"),

@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.journal import sidecar_journal_path
 from cjm_substrate.core.workspace import resolve_workspace
+from cjm_substrate_qt_kit.player import SpanPlayer
 from cjm_substrate_qt_kit.theme import make_font
 from cjm_transcript_correction_core.cli import run_extract
 from cjm_transcript_correction_core.graph import (commit_boundary_shift_correction,
@@ -49,19 +50,18 @@ from cjm_transcript_correction_core.graph import (commit_boundary_shift_correcti
 from cjm_transcript_correction_core.models import (RECOMMENDED_INSERT_LABELS,
                                                    RECOMMENDED_MARK_CLASSES,
                                                    RECOMMENDED_OVERLAY_LABELS)
-from cjm_transcript_correction_tui.spine import (match_sources, neighbor_word_bound,
-                                                 parse_entity_input, parse_mark_input,
-                                                 plan_boundary_shift, plan_chunk_insert,
-                                                 plan_chunk_split, plan_gate, plan_time_nudge,
-                                                 resolve_mark_class_token, segment_word_tokens,
-                                                 snap_word_span)
-from cjm_transcript_correction_tui.state import load_tui_state, save_tui_state, selector_for_spine
+from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_bound,
+                                                  parse_entity_input, parse_mark_input,
+                                                  plan_boundary_shift, plan_chunk_insert,
+                                                  plan_chunk_split, plan_gate, plan_time_nudge,
+                                                  resolve_mark_class_token, segment_word_tokens,
+                                                  snap_word_span)
+from cjm_transcript_correction_core.state import load_tui_state, save_tui_state, selector_for_spine
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QLabel, QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout, QWidget
 
 from . import panes
-from .player import SpanPlayer
 from .session import CorrectionShellSession
 
 # Constants copied from CorrectionApp (stranded as Textual App class
