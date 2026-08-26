@@ -23,6 +23,7 @@ the ffmpeg-pipe/WSOLA/sounddevice stack retires). The playback ticker keeps
 the wall-clock×speed position readout, with an explicit paint-generation
 counter replacing the Textual content-receipt trick."""
 
+import html
 import json
 import time
 from pathlib import Path
@@ -30,7 +31,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.journal import sidecar_journal_path
 from cjm_substrate.core.workspace import resolve_workspace
+from cjm_substrate_qt_kit.keyhints import hint_line, keycaps, KeyHintsOverlay
 from cjm_substrate_qt_kit.player import SpanPlayer
+from cjm_substrate_qt_kit.statusstrip import StatusStrip
 from cjm_substrate_qt_kit.theme import make_font
 from cjm_transcript_correction_core.cli import run_extract
 from cjm_transcript_correction_core.graph import (commit_boundary_shift_correction,
@@ -63,15 +66,22 @@ from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_b
 from cjm_transcript_correction_core.state import load_tui_state, save_tui_state, selector_for_spine
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QLabel, QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout, QWidget
 
 from . import panes
-from .session import CorrectionShellSession
+from .finetune_form import FinetuneFormDialog
+from .session import adapter_config_schema, CorrectionShellSession
 
 _KEYNAMES = {Qt.Key_Up: "up", Qt.Key_Down: "down", Qt.Key_Left: "left",
              Qt.Key_Right: "right", Qt.Key_Tab: "tab", Qt.Key_Backtab: "shift+tab",
              Qt.Key_Escape: "escape", Qt.Key_Return: "enter", Qt.Key_Enter: "enter",
-             Qt.Key_Space: "space"}
+             Qt.Key_Space: "space", Qt.Key_PageUp: "pgup", Qt.Key_PageDown: "pgdn",
+             Qt.Key_Home: "home", Qt.Key_End: "end"}
+
+# Long-range stride for PgUp/PgDn (792d3ac6: page + top/bottom jump as standard
+# options — the thousands-of-segments spine needs fast distant moves; folded-run
+# skipping stays a |delta|==1 concern, so a page stride never fights the folds).
+PAGE_STRIDE = 10
 
 
 class CorrectionWindow(QMainWindow):
@@ -84,6 +94,7 @@ class CorrectionWindow(QMainWindow):
     spine_opened = Signal(object)
     gesture_done = Signal(object)    # every commit gesture resolves through here
     progress_note = Signal(str)      # loop-thread narration (extract log)
+    finetune_done = Signal(object)   # finetune seat Future -> Qt thread
 
     def __init__(self, graph_db_path: Optional[str] = None,
                  *, source: Optional[str] = None,
@@ -98,7 +109,8 @@ class CorrectionWindow(QMainWindow):
                  nudge_step_ms: Optional[float] = None,
                  lane: Optional[str] = None,
                  purpose: Optional[str] = None,
-                 fa_cache_db: Optional[str] = None):
+                 fa_cache_db: Optional[str] = None,
+                 event_capability: str = "cjm-capability-pyannote"):
         super().__init__()
         self.setWindowTitle("cjm transcript correction (qt)")
         self.resize(1080, 780)
@@ -117,6 +129,12 @@ class CorrectionWindow(QMainWindow):
         self._datasets: List[Dict[str, Any]] = []
         self._flywheel_log: List[str] = []
         self._flywheel_return = "select"
+        self._nav_browsing = False   # navigation began — pickers always show
+        self._last_spine: Optional[Tuple[str, str, Optional[str]]] = None
+        self._runs: List[Dict[str, Any]] = []    # training-run manifests
+        self._fly_cursor = 0                     # flywheel dataset cursor
+        self._finetune_busy = False
+        self.event_capability = event_capability
         self._extract_busy = False
         self._purpose_vocab: List[str] = []
         self._include_purposes: set = {"genuine", "wordless-transfer"}
@@ -144,6 +162,8 @@ class CorrectionWindow(QMainWindow):
         self._tick_info = None
         self._tick_claim = -1        # the paint generation the ticker owns
         self._status_gen = 0         # bumped by every status paint (the explicit receipt)
+        self._hint_pins: Dict[str, Any] = {}   # per-scope pinned hint verbs (db-wide sidecar pref)
+        self._editor_helper = ""     # the open editor's prompt (context slot while visible)
         self.lane = lane or "walk"
         self._lane_arg = lane
         self._entities: List[Dict[str, Any]] = []
@@ -159,6 +179,7 @@ class CorrectionWindow(QMainWindow):
         self.resume = resume
         self._state_saved = 0.0
         self._build_widgets()
+        self._build_menubar()
         self._build_key_table()
         self._wheel_accum = 0
         self._ticker = QTimer(self)
@@ -183,6 +204,7 @@ class CorrectionWindow(QMainWindow):
         self.spine_opened.connect(self._on_spine_opened)
         self.gesture_done.connect(self._on_gesture_done)
         self.progress_note.connect(self._on_progress_note)
+        self.finetune_done.connect(self._on_finetune_done)
         self.sess = CorrectionShellSession(manifests_dir,
                                            graph_capability=self._graph_cap)
         self.sess.start()
@@ -207,12 +229,15 @@ class CorrectionWindow(QMainWindow):
         self.editor = QLineEdit()
         self.editor.setVisible(False)
         self.editor.returnPressed.connect(self._on_editor_submitted)
-        self.status = QLabel("loading spine…")
-        self.status.setTextFormat(Qt.PlainText)
-        self.status.setWordWrap(True)
+        self.strip = StatusStrip()
+        self.strip.set_readout("loading spine…")
+        self.hints_overlay = KeyHintsOverlay(
+            self, on_pins_changed=self._on_pins_changed)
+        self.finetune_form = FinetuneFormDialog(
+            self, on_launch=self._launch_finetune)
         lay.addWidget(self.cards, 1)
         lay.addWidget(self.editor)
-        lay.addWidget(self.status)
+        lay.addWidget(self.strip)
         self.setCentralWidget(central)
 
     def _cells(self) -> Tuple[int, int]:
@@ -244,13 +269,112 @@ class CorrectionWindow(QMainWindow):
                 self._wheel_accum += 120
                 self._move(1)
             return True
+        if (obj is self.cards.viewport()
+                and event.type() == QEvent.MouseButtonPress):
+            if event.button() == Qt.BackButton:
+                self.action_back()
+                return True
+            if event.button() == Qt.ForwardButton:
+                self.action_forward()
+                return True
         return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event) -> None:
+        # Window chrome (strip, margins): the same mouse nav as the cards
+        # (the 5d9ca1f8 universal — back/forward buttons navigate).
+        if event.button() == Qt.BackButton:
+            self.action_back()
+            return
+        if event.button() == Qt.ForwardButton:
+            self.action_forward()
+            return
+        super().mousePressEvent(event)
 
     # ---- painting --------------------------------------------------------
 
     def _paint_status(self, text: str) -> None:
+        """Action results land in the strip's persistent-readout slot
+        (DEC 2a42c028): they persist until superseded and never evict the
+        chips or the hint line. The generation counter still arbitrates
+        readout ownership (the ticker-yield contract)."""
         self._status_gen += 1
-        self.status.setText(text)
+        self.strip.set_readout(text)
+
+    def _pin_scope(self) -> str:
+        """Pins are per stage on the pickers/flywheel, per lane on a spine."""
+        return self.stage if self.stage in ("select", "spine",
+                                            "flywheel") else self.lane
+
+    def _lane_pins(self) -> List[str]:
+        return list(self._hint_pins.get(self._pin_scope())
+                    or panes.default_pins(self))
+
+    def _on_pins_changed(self, pins: List[str]) -> None:
+        """The overlay's pin gesture: persist the scope's pin set (db-wide
+        sidecar pref) and refresh the hint line."""
+        self._hint_pins[self._pin_scope()] = list(pins)
+        if self.view is not None and self._graph_db_path:
+            save_tui_state(self._graph_db_path, self.view.source_id, None,
+                           hint_pins=self._hint_pins)
+        self._paint_frame()
+
+    def _paint_frame(self) -> None:
+        """Chips + hint line + overlay model for the current stage/lane —
+        the identity/position half of the old status line; the readout slot
+        is deliberately untouched."""
+        if self.stage == "select":
+            chips = [("context", panes.picker_status_chip(self))]
+        elif self.stage == "spine":
+            chips = [("context", "pick a spine (choice persists)")]
+        elif self.stage == "flywheel":
+            chips = [("context", panes.flywheel_status_chip(self))]
+        elif self.view is not None and self.view.size:
+            chips = panes.status_chips(self)
+        else:
+            chips = []
+        self.strip.set_chips(chips)
+        entries = panes.hint_entries(self)
+        self.strip.set_hints(hint_line(entries, self._lane_pins()))
+        self.hints_overlay.set_entries(entries)
+        self.hints_overlay.pins = self._lane_pins()
+        # The CONTEXT slot derives like the chips (drive verdict 2026-08-25):
+        # the editor's helper prompt while the editor is open, else the
+        # active lane's pick menu — full-width and word-wrapped, so the
+        # variable-length vocabularies never fight the readout for space.
+        if self.editor.isVisible() and self._editor_helper:
+            context = self._editor_helper
+        elif self.stage == "correct" and self.view is not None \
+                and self.view.size and self.lane == "assign":
+            menu = self._assign_menu()
+            context = ("speakers: "
+                       + " · ".join(f"{i + 1}:{nm}"
+                                    for i, (_, nm) in enumerate(menu[:9]))
+                       + " · A new") if menu else "speakers: none yet · A new"
+        elif self.stage == "correct" and self.view is not None \
+                and self.view.size and self.lane == "annotate":
+            menu = self._overlay_label_menu()
+            context = ("◈ " + self._overlay_label + " · "
+                       + " ".join(f"{i + 1}:{c}"
+                                  for i, c in enumerate(menu[:9]))
+                       + (" · …" if len(menu) > 9 else "") + " · A other")
+        else:
+            context = ""
+        self.strip.set_context(self._context_rich(context) if context else "")
+
+    def _context_rich(self, text: str) -> str:
+        """Context-row rich text: pickable tokens wear the overlay's key-cap
+        grammar (kit keycaps) — N:label picks and the bare -/A gesture
+        tokens; everything else, user-minted names included, is escaped."""
+        out = []
+        for tok in html.escape(text, quote=False).split(" "):
+            head, sep, rest = tok.partition(":")
+            if sep and head.isdigit() and rest:
+                out.append(keycaps(head) + " " + rest)
+            elif tok in ("-", "A"):
+                out.append(keycaps(tok))
+            else:
+                out.append(tok)
+        return " ".join(out)
 
     def _render(self) -> None:
         width, height = self._cells()
@@ -258,27 +382,28 @@ class CorrectionWindow(QMainWindow):
             if not self._discovered:
                 return   # boot ladder still running — keep the loading status
             self.cards.setHtml(panes.lines_to_html(panes.picker_lines(self, width)))
-            self._paint_status(panes.picker_status(self))
+            self._paint_frame()
             return
         if self.stage == "spine":
             self.cards.setHtml(panes.lines_to_html(
                 panes.spine_picker_lines(self, width)))
-            self._paint_status(panes.SPINE_PICKER_STATUS)
+            self._paint_frame()
             return
         if self.stage == "flywheel":
             self.cards.setHtml(panes.lines_to_html(
                 panes.flywheel_lines(self, width)))
-            self._paint_status(panes.flywheel_status(self))
+            self._paint_frame()
             return
         view = self.view
         if view is None:
             return
         if not view.size:
+            self._paint_frame()
             self._paint_status(f"{view.source_title}  ·  empty spine")
             return
         self.cards.setHtml(panes.lines_to_html(
             panes.render_rows(self, width, height)))
-        self._paint_status(panes.status_line(self))
+        self._paint_frame()
 
     # ---- the boot ladder (the Textual on_mount, future-chained) ----------
 
@@ -301,7 +426,7 @@ class CorrectionWindow(QMainWindow):
             self._paint_status(f"⚠ source listing failed: {e}")
             return
         picked = match_sources(sources, self._open_kwargs["source"])
-        if len(picked) == 1:
+        if len(picked) == 1 and not self._nav_browsing:
             self._open_source(*picked[0])
             return
         # 2ce81638 discovery: no unique --source -> browse the graph's Sources.
@@ -321,6 +446,7 @@ class CorrectionWindow(QMainWindow):
         self._discovered = True
         self.cursor = 0
         self._render()
+        self._paint_status("")   # picker landing claims the readout (f27f2b99)
 
     def _open_source(self, source_id: str, title: str) -> None:
         """Resolve WHICH skeleton spine first (DEC f1024568): one spine (or an
@@ -339,7 +465,7 @@ class CorrectionWindow(QMainWindow):
             return
         selector = self._open_kwargs["skeleton"]
         sid, title = self._spine_source
-        if selector is None and len(spines) > 1:
+        if self._nav_browsing or (selector is None and len(spines) > 1):
             saved = load_tui_state(self._graph_db_path).get(sid) or {}
             last = str(saved.get("skeleton") or "")
             self._spines = spines
@@ -347,11 +473,13 @@ class CorrectionWindow(QMainWindow):
             self.cursor = next((i for i, sp in enumerate(spines)
                                 if selector_for_spine(sp) == last), 0)
             self._render()
+            self._paint_status("")   # picker landing claims the readout
             return
         self._open_spine(sid, title, selector)
 
     def _open_spine(self, source_id: str, title: str,
                     skeleton: Optional[str]) -> None:
+        self._last_spine = (source_id, title, skeleton)
         self._paint_status(f"opening spine · {title or source_id[:12]}…")
         f = self.sess.open_spine(source_id, title,
                                  rendition=self._open_kwargs["rendition"],
@@ -395,6 +523,8 @@ class CorrectionWindow(QMainWindow):
         self._fa_words_cache = {}
         self._word_cursor, self._word_anchor = 0, None
         self.fold_wordless = bool(state.get("_fold_wordless") or False)
+        pins = state.get("_hint_pins")
+        self._hint_pins = dict(pins) if isinstance(pins, dict) else {}
         self._active_entity = None
         self.cursor = 0
         if self.resume:
@@ -402,6 +532,7 @@ class CorrectionWindow(QMainWindow):
             if saved and self.view.size:
                 self.cursor = max(0, min(self.view.size - 1,
                                          int(saved.get("cursor", 0))))
+        self._paint_status("")   # lane landing claims the readout
         self._render()
         if self.autoplay:
             self._play_cursor()
@@ -418,6 +549,13 @@ class CorrectionWindow(QMainWindow):
             add(k, "next", lambda: self._move(1))
         for k in ("k", "up", "w"):
             add(k, "prev", lambda: self._move(-1))
+        # Long-range nav (792d3ac6): page + top/bottom jump ride the next/prev
+        # ACTION names, so lane legality is exactly the walk's — one gate, no
+        # new core vocabulary. _move clamps on every stage.
+        add("pgdn", "next", lambda: self._move(PAGE_STRIDE))
+        add("pgup", "prev", lambda: self._move(-PAGE_STRIDE))
+        add("end", "next", lambda: self._move(10**9))
+        add("home", "prev", lambda: self._move(-10**9))
         add("r", "replay", self._play_cursor)
         add("g", "seam_next", lambda: self._audition_seam(1))
         add("G", "seam_prev", lambda: self._audition_seam(-1))
@@ -488,12 +626,15 @@ class CorrectionWindow(QMainWindow):
             lambda: self._jump_glyph(1, self.view.pruned_ids, "✂ pruned"))
         add("P", "prev_prune",
             lambda: self._jump_glyph(-1, self.view.pruned_ids, "✂ pruned"))
-        add("F", "gate_editor", self.action_gate_editor)
+        add("W", "gate_editor", self.action_gate_editor)
         add("F", "flywheel_page", self.action_flywheel_page)
         add("X", "extract_dataset", self.action_extract_dataset)
+        add("T", "train_dataset", self.action_train_dataset)
         add("enter", "open_source", self.action_open_source)
         add("z", "toggle_wordless_fold", self.action_toggle_wordless_fold)
         add("escape", "cancel", self.action_cancel)
+        add("escape", "back", self.action_back)
+        add("B", "back", self.action_back)
         add("q", "quit_app", self.close)
         self._key_table = t
 
@@ -503,13 +644,17 @@ class CorrectionWindow(QMainWindow):
         scopes the walk vocabulary."""
         if self.stage == "select":
             return action in ("next", "prev", "open_source", "flywheel_page",
-                              "quit_app")
+                              "back", "quit_app")
         if self.stage == "spine":
             return action in ("next", "prev", "open_source", "flywheel_page",
-                              "quit_app")
+                              "back", "quit_app")
         if self.stage == "flywheel":
             return action in ("flywheel_page", "extract_dataset", "purpose_pick",
-                              "quit_app")
+                              "train_dataset", "next", "prev",
+                              "back", "quit_app")
+        if action in ("back", "flywheel_page"):
+            return True   # shell navigation — lane-universal (f27f2b99),
+                          # never core lane vocabulary
         if self.lane == "assign":
             return action in ASSIGN_LANE_ACTIONS
         if self.lane == "propose":
@@ -520,6 +665,12 @@ class CorrectionWindow(QMainWindow):
                               | ANNOTATE_ONLY_ACTIONS)
 
     def keyPressEvent(self, event) -> None:
+        if event.text() == "?":
+            # Universal, gate-free by design (DEC 2a42c028): the overlay is
+            # available on every stage/lane; it re-points at the live model
+            # in _paint_frame, so open is just a toggle.
+            self.hints_overlay.toggle()
+            return
         name = _KEYNAMES.get(event.key())
         if name is None:
             text = event.text()
@@ -618,8 +769,10 @@ class CorrectionWindow(QMainWindow):
         cur = start_s + (time.monotonic() - t0) * speed
         if cur >= end_s:
             self._stop_ticker()
-            self._paint_status(f"■ played {start_s:.2f}–{end_s:.2f}s{note}"
-                               " · any key clears")
+            # Persistent-readout class (DEC 2a42c028): the played-span readout
+            # stays until the next action supersedes it — that readout IS the
+            # point of replay feedback.
+            self._paint_status(f"■ played {start_s:.2f}–{end_s:.2f}s{note}")
             return
         self._paint_status(f"▶ {cur:.2f}s · span {start_s:.2f}–{end_s:.2f}s{note}"
                            " · esc stops")
@@ -706,8 +859,15 @@ class CorrectionWindow(QMainWindow):
                                          self.cursor + delta))
                 self._render()
             return
-        if self.stage == "flywheel" or self.view is None:
-            return   # the page has no cursor; wheel reaches _move ungated
+        if self.stage == "flywheel":
+            total = len(self._datasets) + len(self._runs)
+            if total:
+                self._fly_cursor = max(0, min(total - 1,
+                                              self._fly_cursor + delta))
+                self._render()
+            return
+        if self.view is None:
+            return
         new = max(0, min(self.view.size - 1, self.cursor + delta))
         if abs(delta) == 1 and panes.folded(self, new):
             probe = new
@@ -893,8 +1053,10 @@ class CorrectionWindow(QMainWindow):
         self.editor.setFocus()
         if caret is not None:
             self.editor.setCursorPosition(caret)
-        if status:
-            self._paint_status(status)
+        # Editor prompts are mode-scoped context, not readout traffic — they
+        # ride the full-width context slot until the editor closes.
+        self._editor_helper = status or ""
+        self._paint_frame()
 
     def _close_editor(self) -> None:
         self.editor.setVisible(False)
@@ -902,6 +1064,8 @@ class CorrectionWindow(QMainWindow):
         self.cards.setFocus(Qt.OtherFocusReason)  # keys land in keyPressEvent again
         self.setFocus(Qt.OtherFocusReason)
         self._input_mode = "edit"
+        self._editor_helper = ""
+        self._paint_frame()
 
     def action_edit(self) -> None:
         self._open_editor("edit", self.view.segments[self.cursor].text)
@@ -976,20 +1140,8 @@ class CorrectionWindow(QMainWindow):
         save_tui_state(self._graph_db_path, self.view.source_id, None,
                        lane=self.lane)
         self._render()
-        if self.lane == "annotate":
-            menu = self._overlay_label_menu()
-            self._paint_status(
-                "annotate: h/l walk words · v range · space commits ◈"
-                + self._overlay_label + " · "
-                + " ".join(f"{i + 1}:{c}" for i, c in enumerate(menu[:6]))
-                + (" · …" if len(menu) > 6 else "") + " · A other · o picks ◈ stack")
-        if self.lane == "assign":
-            menu = self._assign_menu()
-            if menu:
-                self._paint_status(
-                    "assign: " + " · ".join(f"{i + 1}:{nm}"
-                                            for i, (_, nm) in enumerate(menu[:6]))
-                    + (" · …" if len(menu) > 6 else "") + " · A new")
+        # Lane pick menus now DERIVE into the context slot every frame
+        # (_paint_frame) — no entry-time readout paints to go stale.
 
     # ---- assign lane -----------------------------------------------------
 
@@ -2040,9 +2192,23 @@ class CorrectionWindow(QMainWindow):
         if self.stage == "flywheel":
             self.stage = self._flywheel_return
             self._render()
+            self._paint_status("")   # stage landing claims the readout (f27f2b99)
             return
+        if self.view is not None and self.stage == "correct":
+            # From a lane: audio down before the page swap; the seat stays
+            # (open_spine re-points it — session.py), so returning F lands
+            # back on the intact lane.
+            self._autoplay_timer.stop()
+            if self.player is not None:
+                self.player.stop()
+            self._stop_ticker()
         self._flywheel_return = self.stage
+        self._paint_status("")   # leaving the stage: its readout is done
         self._load_datasets()
+        self._load_runs()
+        self._fly_cursor = min(self._fly_cursor,
+                               max(0, len(self._datasets)
+                                   + len(self._runs) - 1))
         fut = self.sess.purposes()
 
         def done(f):
@@ -2055,6 +2221,118 @@ class CorrectionWindow(QMainWindow):
                 - {"genuine"})
             self.stage = "flywheel"
         fut.add_done_callback(lambda f: (done(f), self.progress_note.emit("")))
+
+    # ---- navigation (f27f2b99: pickers/flywheel stop being a dead end) ----
+
+    def _build_menubar(self) -> None:
+        """Menus mirror the key table's SHELL verbs. Keys stay on the table
+        walk (one gate — DEC cc55a7b5), so items carry the key as display
+        text only (the tab column), never a QAction shortcut that would race
+        the walk. No QStatusBar exists, so menu-hover status tips stay inert
+        (the workbench hover-eviction class, dead by construction)."""
+        bar = self.menuBar()
+        fm = bar.addMenu("&File")
+        fm.addAction("Quit\tq", self.close)
+        nav = bar.addMenu("&Navigate")
+        self._nav_actions = {
+            "back": nav.addAction("Back\tB", self.action_back),
+            "sources": nav.addAction("Source picker", self.action_nav_sources),
+            "spines": nav.addAction("Spine picker", self.action_nav_spines),
+            "flywheel": nav.addAction("Flywheel page\tF",
+                                      self.action_flywheel_page)}
+        nav.aboutToShow.connect(self._refresh_nav_menu)
+        vm = bar.addMenu("&View")
+        vm.addAction("Keyboard hints\t?", self.hints_overlay.toggle)
+
+    def _refresh_nav_menu(self) -> None:
+        """Enablement at menu-open time — a read of the same stage legality
+        the key walk enforces."""
+        a = self._nav_actions
+        a["back"].setEnabled(self.stage != "select")
+        a["sources"].setEnabled(self.stage != "select")
+        a["spines"].setEnabled(self._spine_source is not None
+                               and self.stage != "spine")
+        a["flywheel"].setEnabled(self.stage != "flywheel"
+                                 and not self._extract_busy)
+
+    def action_back(self) -> None:
+        """One step back: open editor/pick states cancel first (a modal IS a
+        step), the flywheel returns where it came from, a lane unwinds to
+        the spine picker, the spine picker to the sources."""
+        if (self.editor.isVisible() or self._word_anchor is not None
+                or self._overlay_pick is not None):
+            self.action_cancel()
+            return
+        if self.stage == "flywheel":
+            self.action_flywheel_page()
+            return
+        if self.stage == "correct" and self.view is not None:
+            self.action_nav_spines()
+            return
+        if self.stage == "spine":
+            self.action_nav_sources()
+            return
+        self._paint_status("front door — enter opens · F flywheel")
+
+    def action_forward(self) -> None:
+        """Mouse-forward: re-descend the path back just unwound."""
+        if self.stage == "select" and self._spine_source is not None:
+            self.action_nav_spines()
+        elif self.stage == "spine" and self._last_spine is not None:
+            self._open_spine(*self._last_spine)
+
+    def action_nav_sources(self) -> None:
+        """Re-enter the source picker from anywhere. The CLI --source
+        pre-pick is consumed (auto-open would bounce straight back), and
+        the discovery ladder re-runs so the status chips reflect the work
+        just done."""
+        if self.view is not None:
+            self._leave_lane()
+        self._nav_browsing = True
+        self._open_kwargs["source"] = None
+        self.stage = "select"
+        self._discovered = False
+        self.cursor = 0
+        self._paint_status("reading correction status…")
+        fut = self.sess.list_sources()
+        fut.add_done_callback(self.sources_listed.emit)
+
+    def action_nav_spines(self) -> None:
+        """Back to the chosen source's spine picker (fresh listing). Browse
+        mode always shows the picker, single-spine sources included."""
+        if self._spine_source is None:
+            return
+        if self.view is not None:
+            self._leave_lane()
+        self._nav_browsing = True
+        sid, title = self._spine_source
+        self._paint_status(f"spines · {title or sid[:12]}…")
+        fut = self.sess.list_spines(sid, self._open_kwargs["rendition"])
+        fut.add_done_callback(self.spines_listed.emit)
+
+    def _leave_lane(self) -> None:
+        """Lane teardown-lite: bookmark + audio down — the closeEvent half
+        that leaves the stack alive. The seat itself is just dropped:
+        open_spine re-points it (session.py) and a fresh CorrectionSession
+        is minted on the next open, exactly like the old quit-and-relaunch."""
+        self._autoplay_timer.stop()
+        if self.player is not None:
+            self.player.stop()
+        self._stop_ticker()
+        if self.editor.isVisible():
+            self._close_editor()
+        if self.view is not None:
+            save_tui_state(self._graph_db_path, self.view.source_id,
+                           self.cursor, speed=self.speed)
+        self.view = None
+        self.session_id = None
+        self._marks = {}
+        self._pending_proposal = None
+        self._accept_cluster = None
+        self._active_entity = None
+        self._word_anchor = None
+        self._overlay_pick = None
+        self.cursor = 0
 
     def action_purpose_pick(self, n: int) -> None:
         if self.stage != "flywheel" or self._extract_busy:
@@ -2088,6 +2366,97 @@ class CorrectionWindow(QMainWindow):
             rows.append(m)
         rows.sort(key=lambda m: float(m.get("created_at") or 0.0), reverse=True)
         self._datasets = rows
+
+    def _load_runs(self) -> None:
+        """Training-run manifests, newest first — manifest-driven discovery
+        over <workspace>/training-runs/ (the PropsetIndex pattern named in
+        79d1ab29 rung 2; format-tag routed, capability-agnostic)."""
+        ws = resolve_workspace()
+        root = ((ws.root / "training-runs") if ws is not None
+                else Path("training-runs"))
+        rows: List[Dict[str, Any]] = []
+        try:
+            files = sorted(root.glob("*/manifest.json"))
+        except OSError:
+            files = []
+        for f in files:
+            try:
+                m = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            if not (isinstance(m, dict) and m.get("run_id")
+                    and str(m.get("format") or "")
+                    .endswith("/training-run-manifest")):
+                continue
+            m["_path"] = str(f)
+            rows.append(m)
+        rows.sort(key=lambda m: float(m.get("created_at") or 0.0),
+                  reverse=True)
+        self._runs = rows
+
+    def action_train_dataset(self) -> None:
+        """T on the selected row: the modal run-config form (DEC 99280f79)
+        over the adapter's manifest-carried schema (DEC 48eff28b). A DATASET
+        row seeds schema defaults; a RUN row RE-RUNS THE RECIPE (df0b72c2 —
+        the run's consumed dataset + its config snapshot adopted, so the
+        modified dots show exactly how the recipe differs from defaults;
+        the a1326d5b default-config trap dies here)."""
+        if self.stage != "flywheel" or self._finetune_busy:
+            return
+        if not self._datasets:
+            self._paint_status("no datasets — X extracts one first")
+            return
+        schema = adapter_config_schema(self.sess.manifests_dir,
+                                       "audio_event_detection_finetune")
+        i = self._fly_cursor
+        if i < len(self._datasets):
+            self.finetune_form.open_for(self._datasets[i], schema)
+            return
+        run = self._runs[min(i - len(self._datasets),
+                             len(self._runs) - 1)]
+        did = str(run.get("dataset_id") or "")
+        dataset = next((m for m in self._datasets
+                        if m.get("dataset_id") == did), None)
+        if dataset is None:
+            self._paint_status(f"run {run.get('run_id', '?')}: consumed "
+                               f"dataset {did or '?'} is not in the list — "
+                               "pick a dataset row instead")
+            return
+        self.finetune_form.open_for(
+            dataset, schema, adopt=dict(run.get("config") or {}),
+            adopt_label=str(run.get("run_id") or ""))
+
+    def _launch_finetune(self, config: Dict[str, Any]) -> None:
+        """The form's launch gesture: ONE finetune task through the
+        capability seat (session.finetune_run — the task channel, not an
+        in-window fold); the run manifest lands in the runs section when
+        the Future resolves."""
+        dataset = self.finetune_form.dataset
+        path = str(dataset.get("_path") or "")
+        self.finetune_form.close()
+        if not path or self._finetune_busy:
+            return
+        self._finetune_busy = True
+        self._render()
+        fut = self.sess.finetune_run(self.event_capability, path,
+                                     config or None,
+                                     progress=self.progress_note.emit)
+        fut.add_done_callback(self.finetune_done.emit)
+
+    def _on_finetune_done(self, fut) -> None:
+        self._finetune_busy = False
+        try:
+            res = fut.result() or {}
+        except Exception as e:
+            res = {"manifest": None, "error": str(e)}
+        self._load_runs()
+        self._render()
+        if res.get("error"):
+            self._paint_status(f"⚠ finetune failed: {res['error']}")
+            return
+        m = res.get("manifest") or {}
+        self._paint_status(f"✓ finetune run {m.get('run_id', '?')} — "
+                           "manifest landed")
 
     def action_extract_dataset(self) -> None:
         if self.stage != "flywheel" or self._extract_busy:

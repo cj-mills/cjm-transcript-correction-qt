@@ -433,8 +433,11 @@ SPINE_PICKER_STATUS = "pick a spine  ·  j/k walk · enter open (choice persists
 
 
 def flywheel_lines(s: Any, width: int) -> List[Line]:
-    """The cross-source flywheel page paint (DEC 82c463fe): dataset manifests
-    + the last extract fold's own log lines."""
+    """The cross-source flywheel page paint (DEC 82c463fe; restructured per
+    48eff28b): purpose toggles, CURSOR-NAVIGABLE dataset rows with a
+    selected-row detail block (the class vocabulary word-wraps instead of
+    truncating off-screen), the TRAINING RUNS section (manifest-driven
+    discovery over training-runs/), and the last extract fold's log."""
     lines: List[Line] = [[]]
     lines.append([("  FLYWHEEL — cross-source operations", "bold")])
     lines.append([])
@@ -445,21 +448,78 @@ def flywheel_lines(s: Any, width: int) -> List[Line]:
         purposes.append((f"{p} {'✓' if on else '✗'}", "green" if on else "dim"))
     lines.append(_truncate(purposes, width))
     lines.append([])
+    lines.append([("  DATASETS", "bold"), (f"  {len(s._datasets)}", "dim")])
     if not s._datasets:
-        lines.append([("  no datasets yet — X extracts the gated overlay", "dim")])
+        lines.append(_truncate(
+            [("    no datasets yet — X extracts the gated overlay", "dim")],
+            width))
+    cur = int(getattr(s, "_fly_cursor", 0))   # global: datasets then runs
     for i, m in enumerate(s._datasets):
-        row: Line = [("    ", ""),
-                     (str(m.get("dataset_id") or "?"), "bold" if i == 0 else "")]
+        focused = (i == cur)
         counts = m.get("counts") or {}
-        row.append((f"   {counts.get('examples', 0)} examples", "dim"))
-        vocab = m.get("class_vocabulary") or {}
-        if vocab:
-            row.append(("  ·  " + " ".join(f"{k}x{v}"
-                                           for k, v in sorted(vocab.items())), "dim"))
         spines = m.get("spines") or []
-        row.append((f"  ·  {sum(1 for sp in spines if sp.get('eligible'))}"
-                    f"/{len(spines)} spines", "dim"))
+        row: Line = [("  > " if focused else "    ", ""),
+                     (str(m.get("dataset_id") or "?"),
+                      "bold" if focused else ""),
+                     (f"   {counts.get('examples', 0)} examples", "dim"),
+                     (f"  ·  {sum(1 for sp in spines if sp.get('eligible'))}"
+                      f"/{len(spines)} spines", "dim")]
         lines.append(_truncate(row, width))
+        vocab = m.get("class_vocabulary") or {}
+        if focused and vocab:
+            # The selected row's detail: the full class vocabulary, wrapped —
+            # the single-line stat dump this replaces truncated off-screen.
+            words = [f"{k}x{v}" for k, v in sorted(vocab.items())]
+            for chunk in _wrap_tokens(words, max(20, width - 8)):
+                lines.append([("        " + chunk, "dim")])
+    lines.append([])
+    runs = list(getattr(s, "_runs", []) or [])
+    lines.append([("  TRAINING RUNS", "bold"), (f"  {len(runs)}", "dim")])
+    if getattr(s, "_finetune_busy", False):
+        lines.append(_truncate(
+            [("    ⚙ training… the manifest lands when the run finishes",
+              "yellow")], width))
+    elif not runs:
+        lines.append(_truncate(
+            [("    none yet — T finetunes the selected dataset", "dim")],
+            width))
+    for j, m in enumerate(runs[:10]):
+        focused = (j + len(s._datasets) == cur)
+        base = str((m.get("base_model") or {}).get("model_id") or "?")
+        row = [("  > " if focused else "    ", ""),
+               (str(m.get("run_id") or "?"), "bold" if focused else ""),
+               (f"   {base}", "dim"),
+               (f"  ·  ds …{str(m.get('dataset_id') or '?')[-12:]}", "dim")]
+        totals = ((m.get("counts") or {}).get("totals") or {}).get("train") or {}
+        n = sum(v for v in totals.values() if isinstance(v, (int, float)))
+        if n:
+            row.append((f"  ·  {n} train ex", "dim"))
+        metrics = (m.get("eval") or {}).get("metrics") or {}
+        for k, v in list(metrics.items())[:2]:
+            row.append((f"  ·  {k} {v:.3f}" if isinstance(v, float)
+                        else f"  ·  {k} {v}", "green"))
+        lines.append(_truncate(row, width))
+        if focused:
+            # The selected run's RECIPE (df0b72c2): what T would re-run.
+            classes = m.get("classes") or []
+            if classes:
+                lines.append(_truncate(
+                    [("        classes: " + " ".join(str(c) for c in classes),
+                      "green")], width))
+            cfg = m.get("config") or {}
+            excl = cfg.get("exclude_labels") or []
+            if excl:
+                for w_i, chunk in enumerate(
+                        _wrap_tokens([str(x) for x in excl],
+                                     max(20, width - 17))):
+                    pre = "        exclude: " if w_i == 0 else "                 "
+                    lines.append(_truncate([(pre + chunk, "dim")], width))
+            lines.append(_truncate(
+                [(f"        epochs {cfg.get('max_epochs', '?')}"
+                  f" · lr {cfg.get('learning_rate', '?')}"
+                  f" · batch {cfg.get('batch_size', '?')}"
+                  f" · seed {cfg.get('seed', '?')}"
+                  f"  ·  T re-runs this recipe", "dim")], width))
     if s._flywheel_log:
         lines.append([])
         lines.append([("  last extract:", "bold")])
@@ -526,3 +586,213 @@ def lines_to_html(lines: List[Line]) -> str:
         out.append(body)
     return ("<pre style='margin:0;font-family:inherit'>"
             + "\n".join(out) + "</pre>")
+
+
+def status_chips(s: Any) -> List[Tuple[str, str]]:
+    """The strip's permanent chips (DEC 2a42c028): status_line's identity/
+    position half as named slots — the keybar half now lives in
+    hint_entries + the ?-overlay, and action results ride the readout slot."""
+    view = s.view
+    badges = {"assign": "[ASSIGN]", "propose": "[PROPOSE]",
+              "annotate": "[ANNOTATE]"}.get(s.lane, "[WALK]")
+    if s.purpose:
+        badges += (" [TEST PASS]" if s.purpose == "feature-test"
+                   else f" [{s.purpose.upper()}]")
+    chips: List[Tuple[str, str]] = [
+        ("lane", badges), ("source", str(view.source_title)),
+        ("segment", f"segment {s.cursor + 1}/{view.size}")]
+    chip = gate_chip(view)
+    if chip:
+        chips.append(("gate", chip))
+    if s.lane == "assign":
+        assigned = sum(1 for seg in view.segments if seg.id in view.speakers)
+        meta = view.turns_meta.get("metadata") or {}
+        turns = (f"turns {len(view.turn_proposals)}/{view.size}"
+                 f" · {meta.get('speaker_count', '?')}spk"
+                 if view.turn_proposals else "no turns")
+        active = (entity_name(s._entities, s._active_entity)
+                  if s._active_entity else "none")
+        chips += [("assigned", f"assigned {assigned}/{view.size}"),
+                  ("turns", turns), ("speaker", f"speaker: {active}")]
+    elif s.lane == "propose":
+        meta = view.proposals_meta or {}
+        t2 = meta.get("tier2_total", 0)
+        tier2 = (f" · tier2 {t2} {'shown' if view.show_tier2 else 'hidden'}"
+                 if t2 else "")
+        chips += [("proposals",
+                   f"proposals {meta.get('pending', 0)} pending{tier2}"),
+                  ("set", f"set {str(meta.get('proposal_set_id') or '')[-8:]}"),
+                  ("model",
+                   f"model {str(meta.get('training_run_id') or '')[-8:]}")]
+    elif s.lane == "annotate":
+        seg = view.segments[s.cursor]
+        toks = segment_word_tokens(seg.text)
+        sel = selection_range(s._word_cursor, s._word_anchor, len(toks))
+        chips.append(("overlays", f"◈ {view.overlay_count}"))
+        if toks and sel is not None:
+            a, b = sel
+            readout = " ".join(t for _, _, t in toks[a:b + 1])
+            readout = readout if len(readout) <= 30 else readout[:29] + "…"
+            chips.append(("sel", f"sel “{readout}”"))
+        elif not toks:
+            chips.append(("sel", "(no words here)"))
+        chips.append(("label", f"label: {s._overlay_label}"))
+    else:
+        edited = sum(1 for v in s._marks.values() if v == "corrected")
+        chips.append(("edited", f"edited {edited}"))
+    chips += [("speed", f"×{s.speed:g}"),
+              ("session", f"session {str(s.session_id or '')[:8]}")]
+    return chips
+
+
+def hint_entries(s: Any) -> List[Dict[str, str]]:
+    """The declarative hint model (DEC 2a42c028): the active stage/lane's
+    vocabulary as [{verb, label, key, group}] — the ?-overlay's sections and
+    the hint line's pin identities. Verbs track the key-table ACTION names
+    where a row maps to one action (the remapping-UI alignment); combined
+    rows (j/k) carry the forward action's name."""
+    def e(verb: str, key: str, label: str, group: str) -> Dict[str, str]:
+        return {"verb": verb, "key": key, "label": label, "group": group}
+    if s.stage in ("select", "spine"):
+        rows = [e("next", "j/k", "walk", "Picker"),
+                e("open_source", "enter", "open", "Picker"),
+                e("flywheel_page", "F", "flywheel", "Picker")]
+        if s.stage == "spine":
+            rows.append(e("back", "B/esc", "back to sources", "Picker"))
+        rows.append(e("quit_app", "q", "quit", "Picker"))
+        return rows
+    if s.stage == "flywheel":
+        return [e("next", "j/k", "walk datasets", "Flywheel"),
+                e("purpose_pick", "1-9", "toggle purpose", "Flywheel"),
+                e("extract_dataset", "X", "extract dataset", "Flywheel"),
+                e("train_dataset", "T", "finetune (run row: re-run recipe)",
+                  "Flywheel"),
+                e("flywheel_page", "F/esc", "back", "Flywheel"),
+                e("quit_app", "q", "quit", "Flywheel")]
+    if s.lane == "assign":
+        return [e("assign_accept", "a", "accept turn", "Assign"),
+                e("assign_pick", "1-9", "pick speaker", "Assign"),
+                e("assign_same", "space", "same speaker", "Assign"),
+                e("assign_new", "A", "new speaker", "Assign"),
+                e("next", "j/k", "walk", "Walk"),
+                e("seam_next", "g/G", "seam", "Walk"),
+                e("replay", "r", "replay", "Audio"),
+                e("speed_up", "[/]", "speed", "Audio"),
+                e("yank", "y", "copy", "App"),
+                e("cycle_lane", "tab", "walk lane", "App"),
+                e("back", "B", "spine picker", "App"),
+                e("flywheel_page", "F", "flywheel", "App"),
+                e("quit_app", "q", "quit", "App")]
+    if s.lane == "propose":
+        return [e("propose_accept", "a", "accept proposal", "Proposals"),
+                e("propose_next", "n/N", "jump proposal", "Proposals"),
+                e("propose_audition", "R", "audition proposal", "Proposals"),
+                e("toggle_tier2", "t", "tier2 show/hide", "Proposals"),
+                e("nudge_end_earlier", ",./<>", "nudge", "Edit"),
+                e("insert_chunk", "i/I", "manual insert", "Edit"),
+                e("relabel_insert", "L", "relabel", "Edit"),
+                e("remove_insert", "x", "remove", "Edit"),
+                e("edit", "e", "edit text", "Edit"),
+                e("replay", "r", "replay chunk", "Audio"),
+                e("next", "j/k", "walk", "Walk"),
+                e("seam_next", "g/G", "seam", "Walk"),
+                e("cycle_lane", "tab", "lane", "App"),
+                e("back", "B", "spine picker", "App"),
+                e("flywheel_page", "F", "flywheel", "App"),
+                e("quit_app", "q", "quit", "App")]
+    if s.lane == "annotate":
+        return [e("word_right", "h/l·←→", "word", "Words"),
+                e("word_select", "v", "range", "Words"),
+                e("annotate_quick", "space", "◈ commit", "Words"),
+                e("annotate_pick", "1-9", "class", "Words"),
+                e("annotate_editor", "A", "class+", "Words"),
+                e("overlay_cycle", "o/O", "◈ pick", "Overlays"),
+                e("overlay_nudge", ",./<>", "◈ nudge", "Overlays"),
+                e("overlay_remove", "x", "◈ remove", "Overlays"),
+                e("next_overlay", "n/N", "◈ jump", "Overlays"),
+                e("annotate_audition", "R", "audition", "Audio"),
+                e("replay", "r", "replay", "Audio"),
+                e("next", "j/k", "walk", "Walk"),
+                e("cycle_lane", "tab", "lane", "App"),
+                e("back", "B", "spine picker", "App"),
+                e("flywheel_page", "F", "flywheel", "App"),
+                e("quit_app", "q", "quit", "App")]
+    return [e("next", "j/k·w/s", "walk", "Walk"),
+            e("shift_push", "←→/a/d", "shift boundary", "Walk"),
+            e("seam_next", "g/G", "seam", "Walk"),
+            e("next_mark", "n/N", "⚑ jump", "Walk"),
+            e("next_prune", "p/P", "✂ jump", "Walk"),
+            e("toggle_wordless_fold", "z", "fold ⊕", "Walk"),
+            e("replay", "r", "replay", "Audio"),
+            e("nudge_end_earlier", ",./<>", "nudge", "Audio"),
+            e("nudge_step_up", "{}", "nudge step", "Audio"),
+            e("speed_up", "[/]", "speed", "Audio"),
+            e("gate_editor", "W", "gate", "Audio"),
+            e("edit", "e", "edit text", "Edit"),
+            e("yank", "y", "copy", "Edit"),
+            e("insert_chunk", "i/I", "⊕ insert", "Edit"),
+            e("remove_insert", "x", "⊖ remove", "Edit"),
+            e("split_chunk", "S", "split", "Edit"),
+            e("mark_quick", "m/b", "⚑ mark", "Marks"),
+            e("mark_editor", "M", "⚑ class", "Marks"),
+            e("cycle_lane", "tab", "assign lane", "App"),
+            e("cancel", "esc", "stop audio", "App"),
+            e("back", "B", "spine picker", "App"),
+            e("flywheel_page", "F", "flywheel", "App"),
+            e("quit_app", "q", "quit", "App")]
+
+
+def default_pins(s: Any) -> List[str]:
+    """The hint line's default 3-5 verbs per stage/lane — what shows before
+    the user pins their own set through the ?-overlay (DEC 2a42c028)."""
+    if s.stage in ("select", "spine"):
+        return ["next", "open_source", "quit_app"]
+    if s.stage == "flywheel":
+        return ["purpose_pick", "extract_dataset", "train_dataset"]
+    return {"assign": ["assign_accept", "assign_pick", "assign_same",
+                       "next", "cycle_lane"],
+            "propose": ["propose_accept", "propose_next",
+                        "propose_audition", "next", "cycle_lane"],
+            "annotate": ["word_right", "annotate_quick", "annotate_pick",
+                         "next", "cycle_lane"],
+            }.get(s.lane, ["next", "replay", "nudge_end_earlier", "edit",
+                           "cycle_lane"])
+
+
+def picker_status_chip(s: Any) -> str:
+    """picker_status minus the keybar tail — the chips half only
+    (DEC 2a42c028: gesture hints live in the hint line/overlay now)."""
+    tail = str(s._graph_db_path or "")
+    tail = tail if len(tail) <= 40 else "…" + tail[-39:]
+    return f"pick a source ({len(s._sources)})  ·  @{tail}"
+
+
+def flywheel_status_chip(s: Any) -> str:
+    """flywheel_status minus the keybar tail — the chips half only
+    (DEC 2a42c028)."""
+    busy = ("  ·  extracting…" if s._extract_busy
+            else "  ·  ⚙ training…" if getattr(s, "_finetune_busy", False)
+            else "")
+    runs = len(getattr(s, "_runs", []) or [])
+    tail = f" · {runs} runs" if runs else ""
+    return f"flywheel ({len(s._datasets)} datasets{tail}){busy}"
+
+
+def _wrap_tokens(tokens: List[str],  # Words to flow (kept whole)
+                 width: int,         # Line budget in cells
+                 ) -> List[str]:  # Space-joined lines, each <= width
+    """Greedy token wrap for detail blocks (the flywheel selected-dataset
+    class vocabulary) — tokens never split, an over-wide token stands
+    alone on its line."""
+    out: List[str] = []
+    line = ""
+    for t in tokens:
+        cand = f"{line} {t}" if line else t
+        if line and len(cand) > width:
+            out.append(line)
+            line = t
+        else:
+            line = cand
+    if line:
+        out.append(line)
+    return out
