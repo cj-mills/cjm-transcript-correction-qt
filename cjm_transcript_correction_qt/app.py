@@ -803,6 +803,17 @@ class CorrectionWindow(QMainWindow):
             self.player.stop()
             self._stop_ticker()
             return
+        if c.end_s - c.start_s < 0.02:
+            # Null span on an ORIGINAL chunk (nudged down to nothing — the
+            # partial-word case): sound NOTHING, and say so. The inserted-
+            # chunk branch above already holds this line; without it the
+            # zero-width request reached QMediaPlayer and the whole aseg WAV
+            # played (zero-span replay finding, 2026-08-26).
+            self.player.stop()
+            self._stop_ticker()
+            self._paint_status(f"■ #{seg.index} empty span at "
+                               f"{float(seg.start_time):.2f}s — nothing to play")
+            return
         self.player.play_span(c.wav_path, c.start_s, c.end_s, rate=self.speed)
         if seg.start_time is not None and seg.end_time is not None:
             self._start_ticker(float(seg.start_time), float(seg.end_time), note)
@@ -2410,7 +2421,8 @@ class CorrectionWindow(QMainWindow):
                                        "audio_event_detection_finetune")
         i = self._fly_cursor
         if i < len(self._datasets):
-            self.finetune_form.open_for(self._datasets[i], schema)
+            self.finetune_form.open_for(self._datasets[i], schema,
+                                        datasets=self._datasets)
             return
         run = self._runs[min(i - len(self._datasets),
                              len(self._runs) - 1)]
@@ -2424,7 +2436,8 @@ class CorrectionWindow(QMainWindow):
             return
         self.finetune_form.open_for(
             dataset, schema, adopt=dict(run.get("config") or {}),
-            adopt_label=str(run.get("run_id") or ""))
+            adopt_label=str(run.get("run_id") or ""),
+            datasets=self._datasets)
 
     def _launch_finetune(self, config: Dict[str, Any]) -> None:
         """The form's launch gesture: ONE finetune task through the

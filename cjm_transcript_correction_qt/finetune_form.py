@@ -7,7 +7,7 @@ fields comma-split) · T launch · esc cancel. Launch reports overrides()
 through on_launch — the CALLER submits the task and closes the dialog."""
 
 import html as _html
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from cjm_substrate_qt_kit.keyhints import keycaps
 from cjm_substrate_qt_kit.theme import current_theme, make_font
@@ -28,8 +28,10 @@ class FinetuneFormDialog(QDialog):
         self._on_launch = on_launch
         self.form: Optional[ConfigForm] = None
         self.dataset: Dict[str, Any] = {}
+        self.datasets: List[Dict[str, Any]] = []   # the selectable ring
+        self._opened_id = ""                       # the dataset opened with
         self.adopt_label = ""
-        self.row = 0
+        self.row = 0                               # 0 = dataset row, 1.. = fields
         self._error = ""
         self.view = QTextBrowser(self)
         self.view.setFocusPolicy(Qt.NoFocus)
@@ -46,18 +48,27 @@ class FinetuneFormDialog(QDialog):
     def open_for(self, dataset: Dict[str, Any],
                  schema: Dict[str, Any],
                  adopt: Optional[Dict[str, Any]] = None,
-                 adopt_label: str = "") -> None:
+                 adopt_label: str = "",
+                 datasets: Optional[List[Dict[str, Any]]] = None) -> None:
         """(Re)build the form from the adapter's config schema and open
         centered over the owner — the keyhints sizing recipe: size to the
         RENDERED document (drive verdict e37afc63). `adopt` applies a prior
         run's config snapshot over the schema defaults (df0b72c2: re-run
         the recipe — the modified dots then paint the recipe's diff);
-        `adopt_label` names the provenance in the header."""
+        `adopt_label` names the provenance in the header. `datasets` is
+        the selectable ring (newest first): an adopted run's consumed
+        dataset is only the STARTING point — space on the dataset row
+        cycles to any discovered dataset, so a recipe re-runs on NEW data
+        without retyping its config (the second half of the a1326d5b trap:
+        adopt-recipe alone re-trained the run's own set, 2026-08-26)."""
         self.form = ConfigForm.from_schema(schema)
         if adopt:
             self.form.apply(adopt)
         self.adopt_label = adopt_label if adopt else ""
         self.dataset = dict(dataset)
+        self.datasets = ([dict(d) for d in datasets] if datasets
+                         else [dict(dataset)])
+        self._opened_id = str(dataset.get("dataset_id") or "")
         self.row = 0
         self._error = ""
         owner = self.parentWidget()
@@ -81,6 +92,24 @@ class FinetuneFormDialog(QDialog):
 
     def _fields(self):
         return self.form.fields if self.form is not None else []
+
+    def _cur_field(self):
+        """The schema field under the cursor — None on the dataset row (0)."""
+        fields = self._fields()
+        return fields[self.row - 1] if 0 < self.row <= len(fields) else None
+
+    def _cycle_dataset(self, step: int) -> None:
+        """space/O on the dataset row: step through the discovered ring."""
+        if len(self.datasets) < 2:
+            self._error = "only one dataset discovered — X extracts more"
+            self._render()
+            return
+        did = str(self.dataset.get("dataset_id") or "")
+        idx = next((i for i, d in enumerate(self.datasets)
+                    if str(d.get("dataset_id") or "") == did), 0)
+        self.dataset = dict(self.datasets[(idx + step) % len(self.datasets)])
+        self._error = ""
+        self._render()
 
     def _render_value(self, f) -> str:
         """List-typed fields render comma-joined (parse's dual below);
@@ -110,14 +139,20 @@ class FinetuneFormDialog(QDialog):
                        "regenerate the adapter manifest (cjm-ctl "
                        "generate-adapter-manifest); launch uses worker "
                        "defaults</span>" % theme["content-dim"])
-        for i, f in enumerate(fields):
-            mark = "●" if f.modified else "&nbsp;"
-            row = ("%s %s: <b>%s</b>" % (mark, e(f.title),
-                                         e(self._render_value(f))))
+        did = str(self.dataset.get("dataset_id") or "")
+        rows = [("●" if did != self._opened_id else "&nbsp;", "Dataset",
+                 "%s · %s examples" % (did or "?", counts.get("examples", 0)),
+                 "The dataset this run trains on — space cycles the %d "
+                 "discovered dataset(s), newest first; the recipe rows stay."
+                 % len(self.datasets))]
+        rows += [("●" if f.modified else "&nbsp;", f.title,
+                  self._render_value(f), f.description or "") for f in fields]
+        for i, (mark, title, value, description) in enumerate(rows):
+            row = "%s %s: <b>%s</b>" % (mark, e(title), e(value))
             if i == self.row:
                 desc = ("<br><span style='color:%s'>&nbsp;&nbsp;%s</span>"
-                        % (theme["content-dim"], e(f.description))
-                        if f.description else "")
+                        % (theme["content-dim"], e(description))
+                        if description else "")
                 out.append("<div style='background:%s;color:%s;padding:1px "
                            "4px'>▸ %s%s</div>"
                            % (theme["raised"], theme["content"], row, desc))
@@ -143,27 +178,31 @@ class FinetuneFormDialog(QDialog):
             super().keyPressEvent(event)   # in reject() below
             return
         key = event.text()
-        fields = self._fields()
+        last = len(self._fields())            # row 0 = dataset, 1.. = fields
+        f = self._cur_field()
         if key in ("j",) or event.key() == Qt.Key_Down:
-            self.row = min(len(fields) - 1, self.row + 1) if fields else 0
+            self.row = min(last, self.row + 1)
             self._error = ""
             self._render()
         elif key in ("k",) or event.key() == Qt.Key_Up:
             self.row = max(0, self.row - 1)
             self._error = ""
             self._render()
-        elif key in (" ", "o") and fields:
-            f = fields[self.row]
+        elif key in (" ", "o") and self.row == 0:
+            self._cycle_dataset(1)
+        elif key == "O" and self.row == 0:
+            self._cycle_dataset(-1)
+        elif key in (" ", "o") and f is not None:
             if f.cycle(1):
                 self._error = ""
                 self._render()
             else:
                 self._open_editor()
-        elif key == "O" and fields:
-            if fields[self.row].cycle(-1):
+        elif key == "O" and f is not None:
+            if f.cycle(-1):
                 self._error = ""
                 self._render()
-        elif event.key() in (Qt.Key_Return, Qt.Key_Enter) and fields:
+        elif event.key() in (Qt.Key_Return, Qt.Key_Enter) and f is not None:
             self._open_editor()
         elif key == "T":
             self._on_launch(self.overrides())
@@ -175,7 +214,9 @@ class FinetuneFormDialog(QDialog):
         return self.form.overrides() if self.form is not None else {}
 
     def _open_editor(self) -> None:
-        f = self._fields()[self.row]
+        f = self._cur_field()
+        if f is None:                 # the dataset row has no typed editor
+            return
         self.editor.setText(self._render_value(f)
                             if not isinstance(f.value, list)
                             else ", ".join(str(x) for x in f.value))
@@ -184,7 +225,11 @@ class FinetuneFormDialog(QDialog):
 
     def _commit_editor(self) -> None:
         text = self.editor.text()
-        f = self._fields()[self.row]
+        f = self._cur_field()
+        if f is None:
+            self.editor.setVisible(False)
+            self.setFocus()
+            return
         try:
             if isinstance(f.default, list):
                 # the list dual of _render_value: comma-split, blanks dropped

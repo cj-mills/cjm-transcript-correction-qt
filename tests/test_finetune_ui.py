@@ -90,16 +90,18 @@ def test_action_train_dataset_paths(monkeypatch):
                  _paint_status=notes.append,
                  sess=SimpleNamespace(manifests_dir="/m"),
                  finetune_form=SimpleNamespace(
-                     open_for=lambda d, sch, adopt=None, adopt_label="":
-                     opened.append((d, adopt, adopt_label))))
+                     open_for=lambda d, sch, adopt=None, adopt_label="",
+                     datasets=None:
+                     opened.append((d, adopt, adopt_label, datasets))))
         d.update(kw)
         return SimpleNamespace(**d)
 
     CorrectionWindow.action_train_dataset(state())
-    assert opened[-1] == (ds, None, "")          # dataset row: schema defaults
+    assert opened[-1] == (ds, None, "", [ds])    # dataset row: schema defaults
     CorrectionWindow.action_train_dataset(state(_fly_cursor=1))
     assert opened[-1] == (ds, {"exclude_labels": ["empty", "click"]},
-                          "run_r")               # run row: recipe adopted
+                          "run_r", [ds])         # run row: recipe adopted,
+    #                                              ring passed either way
     CorrectionWindow.action_train_dataset(state(_fly_cursor=2))
     assert "not in the list" in notes[-1]        # consumed dataset missing
 
@@ -187,3 +189,36 @@ def test_flywheel_hints_and_chip():
     assert chip == "flywheel (1 datasets · 2 runs)"
     assert "training…" in panes.flywheel_status_chip(
         fly_state(_finetune_busy=True))
+
+
+def test_form_dataset_row_cycles_ring():
+    """Adopt-recipe onto a DIFFERENT dataset (2026-08-26, the second half of
+    the a1326d5b trap): row 0 is the dataset row; space cycles the discovered
+    ring while the recipe rows stay; the window reads form.dataset at launch;
+    a single-dataset ring refuses the cycle with a note."""
+    import sys
+    from PySide6.QtCore import Qt, QEvent
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+    from cjm_transcript_correction_qt.finetune_form import FinetuneFormDialog
+    QApplication.instance() or QApplication(sys.argv[:1])
+    dlg = FinetuneFormDialog(None, on_launch=lambda o: None)
+    schema = {"properties": {"seed": {"type": "integer", "default": 42}}}
+    old = {"dataset_id": "old", "counts": {"examples": 10}}
+    new = {"dataset_id": "new", "counts": {"examples": 20}}
+    dlg.open_for(old, schema, adopt={"seed": 7}, adopt_label="run_r",
+                 datasets=[new, old])
+    space = QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier, " ")
+    assert dlg.row == 0 and dlg.dataset["dataset_id"] == "old"
+    assert "Dataset" in dlg.view.toPlainText()
+    dlg.keyPressEvent(space)
+    assert dlg.dataset["dataset_id"] == "new"            # ring stepped
+    assert dlg.overrides() == {"seed": 7}                # recipe stays
+    dlg.keyPressEvent(space)
+    assert dlg.dataset["dataset_id"] == "old"            # wraps
+    dlg.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_J, Qt.NoModifier, "j"))
+    assert dlg.row == 1 and dlg._cur_field() is not None
+    dlg.open_for(old, schema, datasets=[old])
+    dlg.keyPressEvent(space)
+    assert "only one dataset" in dlg._error
+    dlg.close()
