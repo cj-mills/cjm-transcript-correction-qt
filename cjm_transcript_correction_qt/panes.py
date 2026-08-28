@@ -658,6 +658,9 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
                 e("open_source", "enter", "open", "Picker"),
                 e("flywheel_page", "F", "flywheel", "Picker")]
         if s.stage == "spine":
+            rows.append(e("export_wordless", "x", "export wordless propset", "Respine"))
+            rows.append(e("transfer_wordless", "t", "transfer events from a sibling",
+                          "Respine"))
             rows.append(e("back", "B/esc", "back to sources", "Picker"))
         rows.append(e("quit_app", "q", "quit", "Picker"))
         return rows

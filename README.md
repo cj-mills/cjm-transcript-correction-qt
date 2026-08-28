@@ -9,7 +9,9 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 - **`cjm_transcript_correction_qt.__init__`** — Qt shell for the transcript-correction workbench — a DIRECT PORT of
 - **`cjm_transcript_correction_qt.app`** — The Qt correction workbench: the same center-pinned segment walk, lane
 - **`cjm_transcript_correction_qt.cli`** — Console-script driver for the Qt shell: the SAME argument surface and
+- **`cjm_transcript_correction_qt.finetune_form`** — Modal finetune-launch form (DECs 48eff28b + 99280f79): the tui-kit
 - **`cjm_transcript_correction_qt.panes`** — Pure paint builders for the correction Qt shell — the Textual paint logic,
+- **`cjm_transcript_correction_qt.respine_dialog`**
 - **`cjm_transcript_correction_qt.session`** — The correction shell's jobs seam: graph stack + JobQueue + the SpineView
 
 ## API
@@ -22,23 +24,32 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 
 - `main` _function_ — Resolve the shared launch surface, run the Qt correction window.
 
+### `cjm_transcript_correction_qt.finetune_form`
+
+- `FinetuneFormDialog` _class_ — The finetune run-config form: schema-driven rows over a chosen
+
 ### `cjm_transcript_correction_qt.panes`
 
 - `annotate_body` _function_ — The focused card's word-level paint in the annotate lane: the word
 - `card_lines` _function_ — One segment card as styled span lines + the offset of its first body
 - `cluster_style` _function_ — Stable per-cluster tint (dim — a proposal reads quieter than an
+- `default_pins` _function_ — The hint line's default 3-5 verbs per stage/lane — what shows before
 - `entity_name` _function_ — Display name for an entity id; provisional handles read with a leading
-- `flywheel_lines` _function_ — The cross-source flywheel page paint (DEC 82c463fe): dataset manifests
+- `flywheel_lines` _function_ — The cross-source flywheel page paint (DEC 82c463fe; restructured per
 - `flywheel_status` _function_
+- `flywheel_status_chip` _function_ — flywheel_status minus the keybar tail — the chips half only
 - `folded` _function_ — Is this position folded away right now? (z toggle; never in the
 - `gate_chip` _function_ — The status-strip gate chip: empty when never asserted (the quiet
 - `gutter_w` _function_ — The source-wide gutter width: sized ONCE from the last segment (the
+- `hint_entries` _function_ — The declarative hint model (DEC 2a42c028): the active stage/lane's
 - `lines_to_html` _function_ — Materialize span lines as one <pre> block for a monospace
 - `picker_lines` _function_ — The 2ce81638 discovery stage: the graph's Sources with correction
 - `picker_status` _function_
+- `picker_status_chip` _function_ — picker_status minus the keybar tail — the chips half only
 - `render_rows` _function_ — Center-pinned paint: the focused card's first body line pinned to the
 - `selection_range` _function_ — The selected token range (inclusive), clamped: the v-anchor..cursor
 - `spine_picker_lines` _function_ — The spine picker (DEC f1024568): one row per coexisting SKELETON.
+- `status_chips` _function_ — The strip's permanent chips (DEC 2a42c028): status_line's identity/
 - `status_line` _function_ — The unified status strip (DEC cc55a7b5): lane badge + purpose badge +
 - `wordless_insert` _function_ — A certified-wordless inserted chunk: wordless CLASS and empty text
 - `wrap_spans` _function_ — Word-wrap styled spans at a cell width (the Textual Text.wrap stand-in):
@@ -46,6 +57,7 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 ### `cjm_transcript_correction_qt.session`
 
 - `CorrectionShellSession` _class_ — The loop-thread seat for the correction shell.
+- `adapter_config_schema` _function_ — Host-side read of a task adapter's config schema from its REGISTRATION
 
 ## Dependencies
 

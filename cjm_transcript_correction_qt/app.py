@@ -63,13 +63,15 @@ from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_b
                                                   plan_chunk_split, plan_gate, plan_time_nudge,
                                                   resolve_mark_class_token, segment_word_tokens,
                                                   snap_word_span)
-from cjm_transcript_correction_core.state import load_tui_state, save_tui_state, selector_for_spine
+from cjm_transcript_correction_core.state import (load_tui_state, save_tui_state,
+                                                  selector_for_spine, spine_label)
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout, QWidget
 
 from . import panes
 from .finetune_form import FinetuneFormDialog
+from .respine_dialog import TransferDialog
 from .session import adapter_config_schema, CorrectionShellSession
 
 _KEYNAMES = {Qt.Key_Up: "up", Qt.Key_Down: "down", Qt.Key_Left: "left",
@@ -95,6 +97,9 @@ class CorrectionWindow(QMainWindow):
     gesture_done = Signal(object)    # every commit gesture resolves through here
     progress_note = Signal(str)      # loop-thread narration (extract log)
     finetune_done = Signal(object)   # finetune seat Future -> Qt thread
+    export_done = Signal(object)     # respine seat Futures -> Qt thread (9af9793a)
+    transfer_planned = Signal(object)
+    transfer_done = Signal(object)
 
     def __init__(self, graph_db_path: Optional[str] = None,
                  *, source: Optional[str] = None,
@@ -134,6 +139,7 @@ class CorrectionWindow(QMainWindow):
         self._runs: List[Dict[str, Any]] = []    # training-run manifests
         self._fly_cursor = 0                     # flywheel dataset cursor
         self._finetune_busy = False
+        self._respine_busy = False   # export / transfer in flight (9af9793a)
         self.event_capability = event_capability
         self._extract_busy = False
         self._purpose_vocab: List[str] = []
@@ -205,6 +211,9 @@ class CorrectionWindow(QMainWindow):
         self.gesture_done.connect(self._on_gesture_done)
         self.progress_note.connect(self._on_progress_note)
         self.finetune_done.connect(self._on_finetune_done)
+        self.export_done.connect(self._on_export_done)
+        self.transfer_planned.connect(self._on_transfer_planned)
+        self.transfer_done.connect(self._on_transfer_done)
         self.sess = CorrectionShellSession(manifests_dir,
                                            graph_capability=self._graph_cap)
         self.sess.start()
@@ -240,6 +249,8 @@ class CorrectionWindow(QMainWindow):
             self, on_pins_changed=self._on_pins_changed)
         self.finetune_form = FinetuneFormDialog(
             self, on_launch=self._launch_finetune)
+        self.transfer_dialog = TransferDialog(
+            self, on_plan=self._plan_transfer, on_commit=self._commit_transfer)
         lay.addWidget(self.cards, 1)
         lay.addWidget(self.editor)
         lay.addWidget(self.strip)
@@ -330,7 +341,7 @@ class CorrectionWindow(QMainWindow):
         if self.stage == "select":
             chips = [("context", panes.picker_status_chip(self))]
         elif self.stage == "spine":
-            chips = [("context", "pick a spine (choice persists)")]
+            chips = [("context", "pick a spine (choice persists) · x export · t transfer")]
         elif self.stage == "flywheel":
             chips = [("context", panes.flywheel_status_chip(self))]
         elif self.view is not None and self.view.size:
@@ -635,6 +646,8 @@ class CorrectionWindow(QMainWindow):
         add("F", "flywheel_page", self.action_flywheel_page)
         add("X", "extract_dataset", self.action_extract_dataset)
         add("T", "train_dataset", self.action_train_dataset)
+        add("x", "export_wordless", self.action_export_wordless)
+        add("t", "transfer_wordless", self.action_transfer_wordless)
         add("enter", "open_source", self.action_open_source)
         add("z", "toggle_wordless_fold", self.action_toggle_wordless_fold)
         add("escape", "cancel", self.action_cancel)
@@ -652,6 +665,7 @@ class CorrectionWindow(QMainWindow):
                               "back", "quit_app")
         if self.stage == "spine":
             return action in ("next", "prev", "open_source", "flywheel_page",
+                              "export_wordless", "transfer_wordless",
                               "back", "quit_app")
         if self.stage == "flywheel":
             return action in ("flywheel_page", "extract_dataset", "purpose_pick",
@@ -2264,6 +2278,13 @@ class CorrectionWindow(QMainWindow):
             "flywheel": nav.addAction("Flywheel page\tF",
                                       self.action_flywheel_page)}
         nav.aboutToShow.connect(self._refresh_nav_menu)
+        sm = bar.addMenu("&Spine")
+        self._spine_actions = {
+            "export": sm.addAction("Export wordless propset\tx",
+                                   self.action_export_wordless),
+            "transfer": sm.addAction("Transfer events from a sibling\tt",
+                                     self.action_transfer_wordless)}
+        sm.aboutToShow.connect(self._refresh_spine_menu)
         vm = bar.addMenu("&View")
         vm.addAction("Keyboard hints\t?", self.hints_overlay.toggle)
 
@@ -2416,6 +2437,110 @@ class CorrectionWindow(QMainWindow):
         rows.sort(key=lambda m: float(m.get("created_at") or 0.0),
                   reverse=True)
         self._runs = rows
+
+    # ---- the respine verbs (9af9793a: spine picker x / t) -----------------
+
+    def action_export_wordless(self) -> None:
+        """x on the spine picker: export the cursor spine's effective
+        wordless layer as a proposal set under <workspace>/proposals — the
+        respine's carve authority (export-wordless-propset, in-process on
+        the open stack). The decomp app's Shift+E ring lists it beside the
+        model sets (exports share the manifest format), so the respine
+        itself stays the decomp app's step; once the new spine exists, t
+        here carries the approvals onto it."""
+        if self.stage != "spine" or not self._spines or self._respine_busy:
+            return
+        ws = resolve_workspace()
+        if ws is None:
+            self._paint_status("⚠ export needs an active workspace (CJM_WORKSPACE) "
+                               "— proposal sets land under <workspace>/proposals")
+            return
+        sid, _title = self._spine_source
+        sp = self._spines[self.cursor]
+        self._respine_busy = True
+        self._paint_status(f"exporting the wordless layer of {spine_label(sp)}…")
+        fut = self.sess.export_wordless(
+            sid, rendition=self._open_kwargs["rendition"],
+            from_skeleton=selector_for_spine(sp),
+            out_root=ws.root / "proposals", ws=ws)
+        fut.add_done_callback(self.export_done.emit)
+
+    def _on_export_done(self, fut) -> None:
+        self._respine_busy = False
+        try:
+            res = fut.result()
+        except Exception as e:
+            self._paint_status(f"⚠ export failed: {e}")
+            return
+        self._paint_status(
+            f"✓ propset {res['set_id']} — {res['donors']} spans "
+            f"({', '.join(res['classes'])}) → proposals/ · the decomp app's "
+            "Shift+E ring picks it for the respine")
+
+    def action_transfer_wordless(self) -> None:
+        """t on the spine picker: carry a sibling spine's approvals onto the
+        cursor spine — the TransferDialog picks the donor, the engine's
+        dry-run plan renders in-dialog, T commits (transfer-wordless + the
+        54aac7d3 speaker-split rider, in-process on the open stack)."""
+        if self.stage != "spine" or self._respine_busy:
+            return
+        if len(self._spines) < 2:
+            self._paint_status("transfer needs a sibling spine — only one spine here")
+            return
+        target = self._spines[self.cursor]
+        donors = [sp for i, sp in enumerate(self._spines) if i != self.cursor]
+        self.transfer_dialog.open_for(target, donors)
+
+    def _plan_transfer(self, donor: Dict[str, Any]) -> None:
+        """The dialog's donor pick: plan on the loop thread; the Future
+        lands back in the dialog through transfer_planned."""
+        sid, _title = self._spine_source
+        target = self._spines[self.cursor]
+        self._respine_busy = True
+        fut = self.sess.transfer_plan(
+            sid, rendition=self._open_kwargs["rendition"],
+            from_skeleton=selector_for_spine(donor),
+            to_skeleton=selector_for_spine(target))
+        fut.add_done_callback(self.transfer_planned.emit)
+
+    def _on_transfer_planned(self, fut) -> None:
+        self._respine_busy = False
+        try:
+            plan = fut.result()
+        except Exception as e:
+            self.transfer_dialog.show_error(str(e))
+            return
+        self.transfer_dialog.show_plan(plan)
+
+    def _commit_transfer(self, plan: Dict[str, Any]) -> None:
+        """The dialog's commit: the rendered plan lands through one
+        CorrectionSession (session.transfer_commit, gesture-serialized)."""
+        sid, _title = self._spine_source
+        self._respine_busy = True
+        self._paint_status(f"transferring {len(plan.get('plan') or [])} events + "
+                           f"{len(plan.get('splits') or [])} splits…")
+        fut = self.sess.transfer_commit(sid, plan, journal_path=self._journal_path,
+                                        actor=self.actor)
+        fut.add_done_callback(self.transfer_done.emit)
+
+    def _on_transfer_done(self, fut) -> None:
+        self._respine_busy = False
+        try:
+            res = fut.result()
+        except Exception as e:
+            self._paint_status(f"⚠ transfer failed: {e}")
+            return
+        self._paint_status(
+            f"✓ transferred {res['transferred']} event inserts + {res['splits']} "
+            f"speaker splits (session {str(res['session_id'])[:8]}) — enter opens "
+            "the spine")
+
+    def _refresh_spine_menu(self) -> None:
+        """Enablement at menu-open time — the spine picker's legality."""
+        a = self._spine_actions
+        on = self.stage == "spine" and not self._respine_busy
+        a["export"].setEnabled(on and bool(self._spines))
+        a["transfer"].setEnabled(on and len(self._spines) >= 2)
 
     def action_train_dataset(self) -> None:
         """T on the selected row: the modal run-config form (DEC 99280f79)

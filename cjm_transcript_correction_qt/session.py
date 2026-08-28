@@ -25,7 +25,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate_qt_kit.loopthread import LoopThreadSession
-from cjm_transcript_correction_core.cli import load_capabilities
+from cjm_transcript_correction_core.cli import (commit_wordless_transfer, load_capabilities,
+                                                plan_wordless_export, plan_wordless_transfer,
+                                                resolve_source_node, write_wordless_propset)
 from cjm_transcript_correction_core.graph import (list_source_spines, list_speaker_entities,
                                                   session_purposes_by_source, start_session)
 from cjm_transcript_correction_core.spine import list_sources, open_stack, source_status, SpineView
@@ -204,6 +206,67 @@ class CorrectionShellSession(LoopThreadSession):
         self.view = view
         self.session_id = sess.id
         return {"view": view, "session_id": sess.id, "entities": entities}
+
+    # ---- the respine seat (9af9793a: spine picker x / t) ------------------
+
+    def export_wordless(self, source_id: str, *, rendition: Optional[str],
+                        from_skeleton: str, out_root: Any, ws: Any) -> Future:
+        """x on the spine picker: export one spine's effective wordless
+        layer as a proposal set under out_root (<workspace>/proposals) —
+        the export-wordless-propset engine in-process on the open stack
+        (plan_wordless_export + write_wordless_propset). Resolves to the
+        write receipt + {"donors","word_bearing"}; a library exit resolves
+        the Future as RuntimeError, never kills the loop."""
+        return self.submit(self._export_wordless(source_id, rendition,
+                                                 from_skeleton, out_root, ws))
+
+    async def _export_wordless(self, source_id, rendition, from_skeleton,
+                               out_root, ws):
+        try:
+            sid, _title, media_path = await resolve_source_node(
+                self.queue, self.graph_capability, source_id)
+            plan = await plan_wordless_export(
+                self.queue, self.graph_capability, sid,
+                from_skeleton=from_skeleton, rendition=rendition)
+            res = write_wordless_propset(
+                plan, out_root=Path(out_root), source_id=sid,
+                media_path=media_path, from_skeleton=from_skeleton,
+                rendition=rendition, ws=ws)
+        except SystemExit as e:
+            raise RuntimeError(str(e) or "export refused") from e
+        res["donors"] = len(plan["donors"])
+        res["word_bearing"] = plan["word_bearing"]
+        return res
+
+    def transfer_plan(self, source_id: str, *, rendition: Optional[str],
+                      from_skeleton: str, to_skeleton: str,
+                      tolerance: float = 0.05) -> Future:
+        """t on the spine picker, phase 1: the transfer-wordless DRY-RUN
+        plan (plan_wordless_transfer — reads only; the same dict the CLI
+        prints) for the TransferDialog to render before anything commits."""
+        return self.submit(self._transfer_plan(source_id, rendition,
+                                               from_skeleton, to_skeleton,
+                                               tolerance))
+
+    async def _transfer_plan(self, source_id, rendition, from_skeleton,
+                             to_skeleton, tolerance):
+        try:
+            return await plan_wordless_transfer(
+                self.queue, self.graph_capability, source_id,
+                from_skeleton=from_skeleton, to_skeleton=to_skeleton,
+                rendition=rendition, tolerance=tolerance)
+        except SystemExit as e:
+            raise RuntimeError(str(e) or "transfer refused") from e
+
+    def transfer_commit(self, source_id: str, plan: Dict[str, Any], *,
+                        journal_path: Any, actor: str) -> Future:
+        """t on the spine picker, phase 2: COMMIT the rendered plan
+        (commit_wordless_transfer — one CorrectionSession, journaled through
+        the sidecar like every walk gesture), serialized through the gesture
+        lock so no walk gesture interleaves with the batch."""
+        return self.run_serial(commit_wordless_transfer(
+            self.queue, self.graph_capability, source_id, plan,
+            journal_path=journal_path, actor=actor))
 
     # ---- teardown --------------------------------------------------------
 

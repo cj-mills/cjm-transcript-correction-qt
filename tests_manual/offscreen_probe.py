@@ -209,7 +209,9 @@ def main() -> int:
     # ---- navigation slice (f27f2b99): no more dead ends ------------------
     # the menubar exists and mirrors the shell verbs (keys stay on the walk)
     assert [a.text() for a in win.menuBar().actions()] == \
-        ["&File", "&Navigate", "&View"]
+        ["&File", "&Navigate", "&Spine", "&View"]
+    win._refresh_spine_menu()            # spine picker verbs (9af9793a): stage-gated
+    assert not win._spine_actions["export"].isEnabled()
     win._refresh_nav_menu()
     assert win._nav_actions["back"].isEnabled()
     assert win._nav_actions["spines"].isEnabled()
