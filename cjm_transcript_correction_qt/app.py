@@ -222,6 +222,11 @@ class CorrectionWindow(QMainWindow):
         self.cards = QTextBrowser()
         self.cards.setReadOnly(True)
         self.cards.setFocusPolicy(Qt.NoFocus)
+        # Selectable text (walkthrough call-out 04519af8): a mouse drag
+        # selects on the painted cards — ruled explicitly here; the pane
+        # never takes focus, so Ctrl+C is routed from keyPressEvent.
+        self.cards.setTextInteractionFlags(Qt.TextSelectableByMouse
+                                           | Qt.LinksAccessibleByMouse)
         self.cards.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.cards.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.cards.setFont(make_font(kind="mono"))
@@ -670,6 +675,13 @@ class CorrectionWindow(QMainWindow):
             # available on every stage/lane; it re-points at the live model
             # in _paint_frame, so open is just a toggle.
             self.hints_overlay.toggle()
+            return
+        if (event.key() == Qt.Key_C
+                and event.modifiers() & Qt.ControlModifier
+                and self.cards.textCursor().hasSelection()):
+            # Copy out of the cards pane (04519af8): the NoFocus pane never
+            # sees the key itself, so the window forwards it.
+            self.cards.copy()
             return
         name = _KEYNAMES.get(event.key())
         if name is None:
@@ -2437,7 +2449,10 @@ class CorrectionWindow(QMainWindow):
         self.finetune_form.open_for(
             dataset, schema, adopt=dict(run.get("config") or {}),
             adopt_label=str(run.get("run_id") or ""),
-            datasets=self._datasets)
+            datasets=self._datasets,
+            # the run's TRAINED class set — the Excluded-Labels row diffs the
+            # chosen dataset's census against it (1275eb52)
+            adopt_classes=list(run.get("classes") or []))
 
     def _launch_finetune(self, config: Dict[str, Any]) -> None:
         """The form's launch gesture: ONE finetune task through the

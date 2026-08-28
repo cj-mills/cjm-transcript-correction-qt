@@ -81,6 +81,7 @@ def test_action_train_dataset_paths(monkeypatch):
                         lambda d, t: {"properties": {}})
     ds = {"dataset_id": "d1", "_path": "/x/manifest.json"}
     run = {"run_id": "run_r", "dataset_id": "d1",
+           "classes": ["speech", "inhale"],
            "config": {"exclude_labels": ["empty", "click"]}}
     stray = {"run_id": "run_s", "dataset_id": "gone"}
 
@@ -91,17 +92,19 @@ def test_action_train_dataset_paths(monkeypatch):
                  sess=SimpleNamespace(manifests_dir="/m"),
                  finetune_form=SimpleNamespace(
                      open_for=lambda d, sch, adopt=None, adopt_label="",
-                     datasets=None:
-                     opened.append((d, adopt, adopt_label, datasets))))
+                     datasets=None, adopt_classes=None:
+                     opened.append((d, adopt, adopt_label, datasets,
+                                    adopt_classes))))
         d.update(kw)
         return SimpleNamespace(**d)
 
     CorrectionWindow.action_train_dataset(state())
-    assert opened[-1] == (ds, None, "", [ds])    # dataset row: schema defaults
+    assert opened[-1] == (ds, None, "", [ds], None)  # dataset row: defaults
     CorrectionWindow.action_train_dataset(state(_fly_cursor=1))
     assert opened[-1] == (ds, {"exclude_labels": ["empty", "click"]},
-                          "run_r", [ds])         # run row: recipe adopted,
-    #                                              ring passed either way
+                          "run_r", [ds], ["speech", "inhale"])
+    #                    run row: recipe adopted + its TRAINED class set
+    #                    (1275eb52); the ring passes either way
     CorrectionWindow.action_train_dataset(state(_fly_cursor=2))
     assert "not in the list" in notes[-1]        # consumed dataset missing
 
@@ -222,3 +225,92 @@ def test_form_dataset_row_cycles_ring():
     dlg.keyPressEvent(space)
     assert "only one dataset" in dlg._error
     dlg.close()
+
+
+def test_form_excluded_labels_surfaces_classes_new_vs_recipe():
+    """Excluded-Labels new-class guard (1275eb52; the e6694c0c stray): with
+    a recipe adopted, classes the chosen dataset has that the recipe never
+    TRAINED are auto-added to Excluded Labels (count-ordered) and flagged
+    on the row; cycling the ring re-diffs against the new census; a hand
+    edit that keeps a class stands; no recipe = no diff; the header
+    carries the kit's mouse close and the anchor route rejects."""
+    import sys
+    from PySide6.QtCore import Qt, QEvent, QUrl
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+    from cjm_transcript_correction_qt.finetune_form import FinetuneFormDialog
+    QApplication.instance() or QApplication(sys.argv[:1])
+    dlg = FinetuneFormDialog(None, on_launch=lambda o: None)
+    schema = {"properties": {
+        "exclude_labels": {"type": "array", "items": {"type": "string"},
+                           "default": ["empty"], "title": "Excluded Labels"},
+        "seed": {"type": "integer", "default": 42}}}
+    trained = {"dataset_id": "old", "counts": {"examples": 10},
+               "class_vocabulary": {"speech": 400, "inhale": 90, "empty": 30,
+                                    "click": 4}}
+    grown = {"dataset_id": "new", "counts": {"examples": 20},
+             "class_vocabulary": {"speech": 500, "inhale": 120, "empty": 40,
+                                  "click": 5, "chuckle": 6,
+                                  "background-music": 3}}
+    recipe = {"exclude_labels": ["empty", "click"], "seed": 7}
+    # the run's own dataset: nothing new -> the recipe's list, untouched
+    dlg.open_for(trained, schema, adopt=recipe, adopt_label="run_r",
+                 datasets=[grown, trained], adopt_classes=["speech", "inhale"])
+    assert dlg._new_classes == []
+    assert dlg.overrides()["exclude_labels"] == ["empty", "click"]
+    assert "new vs recipe" not in dlg.view.toPlainText()
+    assert 'href="close:"' in dlg.view.toHtml() or "✕" in dlg.view.toPlainText()
+    # cycle onto the grown dataset: the two unseen classes are auto-excluded
+    space = QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier, " ")
+    dlg.keyPressEvent(space)
+    assert dlg.dataset["dataset_id"] == "new"
+    assert dlg._new_classes == ["chuckle", "background-music"]   # count order
+    assert dlg.overrides()["exclude_labels"] == ["empty", "click", "chuckle",
+                                                 "background-music"]
+    text = dlg.view.toPlainText()
+    assert "new vs recipe: chuckle×6, background-music×3" in text
+    # back to the trained set: the auto-adds go, the recipe's list returns
+    dlg.keyPressEvent(space)
+    assert dlg._new_classes == []
+    assert dlg.overrides()["exclude_labels"] == ["empty", "click"]
+    # a hand edit keeps chuckle as a class: the guard's add is dropped
+    dlg.keyPressEvent(space)
+    dlg.row = 1
+    dlg.editor.setText("empty, click, background-music")
+    dlg._commit_editor()
+    assert dlg.overrides()["exclude_labels"] == ["empty", "click",
+                                                 "background-music"]
+    assert dlg._new_classes == ["background-music"]
+    # opened straight from a dataset row (no recipe): nothing to diff
+    dlg.open_for(grown, schema, datasets=[grown])
+    assert dlg._new_classes == [] and dlg.overrides() == {}
+    # the header's close anchor rejects the dialog (140a7b3c)
+    assert dlg.isVisible()
+    dlg._on_anchor(QUrl("close:"))
+    assert not dlg.isVisible()
+    dlg._on_anchor(QUrl("pin:x"))        # any other anchor is ignored
+    dlg.close()
+
+
+def test_ctrl_c_copies_the_cards_selection():
+    """Selectable text (04519af8): the cards pane never takes focus, so the
+    window forwards Ctrl+C to it — only when a selection exists; otherwise
+    the key falls through to the table / super() as before (on the fake,
+    reaching super() raises TypeError — the fall-through signal)."""
+    import pytest
+    from PySide6.QtCore import Qt
+    copied = []
+    cursor = SimpleNamespace(hasSelection=lambda: True)
+    s = SimpleNamespace(
+        cards=SimpleNamespace(textCursor=lambda: cursor,
+                              copy=lambda: copied.append(1)),
+        hints_overlay=SimpleNamespace(toggle=lambda: None),
+        _key_table={}, _allowed=lambda a: True)
+    ctrl_c = SimpleNamespace(key=lambda: Qt.Key_C, text=lambda: "\x03",
+                             modifiers=lambda: Qt.ControlModifier)
+    CorrectionWindow.keyPressEvent(s, ctrl_c)
+    assert copied == [1]
+    cursor.hasSelection = lambda: False
+    with pytest.raises(TypeError):          # reached super(): not copied
+        CorrectionWindow.keyPressEvent(s, ctrl_c)
+    assert copied == [1]
