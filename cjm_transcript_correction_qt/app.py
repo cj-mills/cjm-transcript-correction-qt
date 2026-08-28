@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.journal import sidecar_journal_path
 from cjm_substrate.core.workspace import resolve_workspace
+from cjm_substrate.utils.lifecycle import partition_lifecycle
 from cjm_substrate_qt_kit.keyhints import hint_line, keycaps, KeyHintsOverlay
 from cjm_substrate_qt_kit.player import SpanPlayer
 from cjm_substrate_qt_kit.statusstrip import StatusStrip
@@ -2409,7 +2410,9 @@ class CorrectionWindow(QMainWindow):
             m["_path"] = str(f)
             rows.append(m)
         rows.sort(key=lambda m: float(m.get("created_at") or 0.0), reverse=True)
-        self._datasets = rows
+        # Lifecycle (b20cb911): an archived dataset leaves the ring — the
+        # substrate sidecar seam the decomp indexes filter through too.
+        self._datasets, _archived = partition_lifecycle(rows)
 
     def _load_runs(self) -> None:
         """Training-run manifests, newest first — manifest-driven discovery
@@ -2436,7 +2439,10 @@ class CorrectionWindow(QMainWindow):
             rows.append(m)
         rows.sort(key=lambda m: float(m.get("created_at") or 0.0),
                   reverse=True)
-        self._runs = rows
+        # Lifecycle (b20cb911): archived runs leave the flywheel list — the
+        # decomp app's m picker archives/unarchives them (or the CLI:
+        # python -m cjm_substrate.utils.lifecycle).
+        self._runs, _archived = partition_lifecycle(rows)
 
     # ---- the respine verbs (9af9793a: spine picker x / t) -----------------
 

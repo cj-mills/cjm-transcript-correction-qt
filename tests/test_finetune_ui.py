@@ -47,6 +47,12 @@ def test_load_runs_filters_and_sorts(tmp_path, monkeypatch):
     CorrectionWindow._load_runs(s)
     assert [m["run_id"] for m in s._runs] == ["run_b", "run_a"]  # newest first
     assert all("_path" in m for m in s._runs)
+    # an ARCHIVED run (lifecycle sidecar, b20cb911) leaves the flywheel list
+    from cjm_substrate.utils.lifecycle import ArtifactLifecycle
+    ArtifactLifecycle(newer).archive(reason="test run")
+    CorrectionWindow._load_runs(s)
+    assert [m["run_id"] for m in s._runs] == ["run_a"]
+    assert s._runs[0]["_lifecycle"] == "active"
 
 
 def test_train_gating_and_flywheel_cursor():
