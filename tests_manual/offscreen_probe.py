@@ -275,10 +275,16 @@ def main() -> int:
     assert dlg.isVisible() and len(dlg._fields()) == 2
     assert "dataset_probe" in dlg.view.toPlainText()
 
-    # space cycles the bool row; the transient editor commits a typed int
-    dlg.row = 1
-    assert dlg._fields()[1].cycle(1)
+    # row 0 is the DATASET ring row (2026-08-27 form sitting) — no typed
+    # editor there; schema fields start at row 1 (finding 1b540386: this
+    # walk drove rows by the pre-dataset-row model and silently skipped the
+    # int edit). space cycles the bool row; the transient editor commits a
+    # typed int on the Max Epochs row.
     dlg.row = 0
+    assert dlg._cur_field() is None
+    dlg.row = 2
+    assert dlg._fields()[1].cycle(1)
+    dlg.row = 1
     dlg._open_editor()
     dlg.editor.setText("5")
     dlg._commit_editor()
