@@ -17,6 +17,7 @@ cells. The pin never moves; the spine flows past it."""
 
 import html as _html
 import re as _re
+import time as _time
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_transcript_correction_core.models import WORDLESS_INSERT_LABELS
@@ -372,179 +373,248 @@ def status_line(s: Any) -> str:
 # ---- the pickers (ports of _render_picker / _render_spine_picker) --------
 
 
-def picker_lines(s: Any, width: int) -> List[Line]:
-    """The 2ce81638 discovery stage: the graph's Sources with correction
-    status at a glance."""
-    lines: List[Line] = [[]]
+def _source_row(s: Any, sid: str, title: str) -> Dict[str, Any]:
+    """One source picker item row (key = (source_id, title) — what a pick
+    means to the app): correction status at a glance, the purpose-mix chips."""
+    st = s._status.get(sid) or {}
+    spans: Line = [("  ", ""), (title or sid[:12], "")]
+    spans.append((f"   {st.get('segments', 0)} segs", "dim"))
+    spans.append((f" · {st.get('corrections', 0)} corrections", "dim"))
+    marks = st.get("marks", 0)
+    if marks:
+        spans.append((f" · {marks} ⚑", "yellow"))
+    mix = s._purposes.get(sid) or {}
+    genuine = mix.get("genuine", 0)
+    tests = sum(n for p, n in mix.items() if p != "genuine")
+    if genuine:
+        spans.append((f" · genuine: {genuine}", "green"))
+        if tests:
+            spans.append((f" (+{tests} test)", "dim"))
+    elif tests:
+        spans.append((" · all test", "yellow"))
+    return {"kind": "item", "spans": spans, "key": (sid, title)}
+
+
+def picker_rows(s: Any) -> List[Dict[str, Any]]:
+    """The 2ce81638 discovery stage as kit PickerList rows (8d29f0f0):
+    sources grouped under Collection headers — the hub build_rows grouping
+    (chain order first, unordered tail alphabetical, an Unfiled tail for
+    sources no collection holds); a graph with no Collections lists flat.
+    The app derives its open order from the item keys."""
     if not s._sources:
-        lines.append([("  no Source nodes on this graph", "dim")])
-    for i, (sid, title) in enumerate(s._sources):
-        st = s._status.get(sid) or {}
-        focused = (i == s.cursor)
-        row: Line = [("  > " if focused else "    ", "")]
-        row.append((title or sid[:12], "bold" if focused else ""))
-        row.append((f"   {st.get('segments', 0)} segs", "dim"))
-        row.append((f" · {st.get('corrections', 0)} corrections", "dim"))
-        marks = st.get("marks", 0)
-        if marks:
-            row.append((f" · {marks} ⚑", "yellow"))
-        mix = s._purposes.get(sid) or {}
-        genuine = mix.get("genuine", 0)
-        tests = sum(n for p, n in mix.items() if p != "genuine")
-        if genuine:
-            row.append((f" · genuine: {genuine}", "green"))
-            if tests:
-                row.append((f" (+{tests} test)", "dim"))
-        elif tests:
-            row.append((" · all test", "yellow"))
-        lines.append(_truncate(row, width))
+        return [{"kind": "note",
+                 "spans": [("  no Source nodes on this graph", "dim")]}]
+    rows: List[Dict[str, Any]] = []
+    cols = list(getattr(s, "_collections", []) or [])
+    if not cols:
+        for sid, title in s._sources:
+            rows.append(_source_row(s, sid, title))
+        return rows
+    members = dict(getattr(s, "_coll_members", {}) or {})
+    order = dict(getattr(s, "_coll_order", {}) or {})
+    titles = dict(s._sources)
+    filed: set = set()
+    for c in sorted(cols, key=lambda c: (c.get("title") or "").lower()):
+        ms = members.get(c["id"], [])
+        flag = "  ⚑ proposed" if c.get("status") == "proposed" else ""
+        rows.append({"kind": "header",
+                     "spans": [("  " + (c.get("title") or c["id"][:12]), "bold"),
+                               (f"   {len(ms)} source(s){flag}", "dim")]})
+        member_ids = {i for i, _ in ms}
+        ordered = [i for i in order.get(c["id"], []) if i in member_ids]
+        tail = sorted((i for i in member_ids if i not in set(ordered)),
+                      key=lambda i: (titles.get(i) or "").lower())
+        for sid in ordered + tail:
+            rows.append(_source_row(s, sid,
+                                    titles.get(sid) or dict(ms).get(sid) or sid))
+            filed.add(sid)
+    unfiled = [(i, t) for i, t in s._sources if i not in filed]
+    if unfiled:
+        rows.append({"kind": "header",
+                     "spans": [("  Unfiled", "bold"),
+                               (f"   {len(unfiled)} source(s)", "dim")]})
+        for sid, title in sorted(unfiled, key=lambda p: (p[1] or "").lower()):
+            rows.append(_source_row(s, sid, title))
+    return rows
+
+
+def picker_detail(s: Any) -> List[Line]:
+    """The focused source's identity block (2e0928f2 propagated to the
+    correction discovery surface): id + status counts + session-purpose mix
+    + the collections holding it — the kit detail pane repaints this alone
+    on cursor moves."""
+    items = list(getattr(s, "_picker_items", []) or [])
+    if not items or not (0 <= s.cursor < len(items)):
+        return []
+    sid, title = items[s.cursor]
+    st = s._status.get(sid) or {}
+    lines: List[Line] = [[(title or sid[:12], "bold"), ("  ·  " + sid, "dim")]]
+    row: Line = [(f"{st.get('segments', 0)} segments · "
+                  f"{st.get('corrections', 0)} corrections", "dim")]
+    marks = st.get("marks", 0)
+    if marks:
+        row.append((f" · {marks} ⚑ open marks", "yellow"))
+    lines.append(row)
+    mix = s._purposes.get(sid) or {}
+    if mix:
+        lines.append([("sessions: " + " · ".join(
+            f"{p} {n}" for p, n in sorted(mix.items())), "dim")])
+    holding = [str(c.get("title") or "")
+               for c in getattr(s, "_collections", []) or []
+               if any(m == sid for m, _ in
+                      (getattr(s, "_coll_members", {}) or {}).get(c["id"], []))]
+    if holding:
+        lines.append([("collections: " + ", ".join(holding), "dim")])
     return lines
 
 
-def picker_status(s: Any) -> str:
-    tail = str(s._graph_db_path or "")
-    tail = tail if len(tail) <= 40 else "…" + tail[-39:]
-    return (f"pick a source ({len(s._sources)})  ·  @{tail}"
-            f"  ·  j/k walk · enter open · q quit")
-
-
-def spine_picker_lines(s: Any, width: int) -> List[Line]:
-    """The spine picker (DEC f1024568): one row per coexisting SKELETON."""
+def spine_picker_rows(s: Any) -> List[Dict[str, Any]]:
+    """The spine picker (DEC f1024568) as kit rows: one item per coexisting
+    SKELETON, keyed by its index into s._spines. Created-at rides each row
+    (65cdd573 (a)) so respined skeletons are tellable apart; retire/archive
+    filtering (65cdd573 (b)) stays discussion-first."""
     from cjm_transcript_correction_core.state import spine_label
     _, title = s._spine_source or ("", "")
-    lines: List[Line] = [[]]
-    header: Line = [("  ", ""), (title or "source", "bold"),
-                    (f"  ·  {len(s._spines)} spines coexist — pick one", "dim")]
-    lines.append(header)
-    lines.append([])
+    rows: List[Dict[str, Any]] = [
+        {"kind": "note",
+         "spans": [("  ", ""), (title or "source", "bold"),
+                   (f"  ·  {len(s._spines)} spines coexist — pick one", "dim")]},
+        {"kind": "note", "spans": []},
+    ]
     for i, sp in enumerate(s._spines):
-        focused = (i == s.cursor)
-        row: Line = [("  > " if focused else "    ", "")]
-        row.append((spine_label(sp), "bold" if focused else ""))
-        row.append((f"   {sp.get('segments', 0)} segs", "dim"))
-        lines.append(_truncate(row, width))
-    return lines
-
-
-SPINE_PICKER_STATUS = "pick a spine  ·  j/k walk · enter open (choice persists) · q quit"
+        spans: Line = [("  ", ""), (spine_label(sp), ""),
+                       (f"   {sp.get('segments', 0)} segs", "dim")]
+        created = float(sp.get("created_at") or 0.0)
+        if created:
+            spans.append(("  ·  " + _time.strftime(
+                "%Y-%m-%d %H:%M", _time.localtime(created)), "dim"))
+        rows.append({"kind": "item", "spans": spans, "key": i})
+    return rows
 
 
 # ---- the flywheel page (port of _render_flywheel) ------------------------
 
 
-def flywheel_lines(s: Any, width: int) -> List[Line]:
-    """The cross-source flywheel page paint (DEC 82c463fe; restructured per
-    48eff28b): purpose toggles, CURSOR-NAVIGABLE dataset rows with a
-    selected-row detail block (the class vocabulary word-wraps instead of
-    truncating off-screen), the TRAINING RUNS section (manifest-driven
-    discovery over training-runs/), and the last extract fold's log."""
-    lines: List[Line] = [[]]
-    lines.append([("  FLYWHEEL — cross-source operations", "bold")])
-    lines.append([])
+def flywheel_rows(s: Any) -> List[Dict[str, Any]]:
+    """The cross-source flywheel page (DEC 82c463fe; restructured per
+    48eff28b) as kit rows: purpose toggles, then DATASETS and TRAINING RUNS
+    as native grouped items — keys ("dataset", manifest) / ("run", manifest)
+    are the app's _fly_items map. Archived artifacts ride the sections
+    dimmed + chipped ⌂ when shown (h — the b20cb911 lifecycle surface,
+    the decomp trainrun-picker grammar); the last extract fold's log trails
+    as notes. The focused row's vocabulary/recipe detail lives in
+    flywheel_detail (the kit detail pane)."""
+    rows: List[Dict[str, Any]] = []
     purposes: Line = [("  feedstock purposes:  ", ""), ("genuine ✓", "green")]
     for i, p in enumerate(s._purpose_vocab, 1):
         on = p in s._include_purposes
         purposes.append((f"   [{i}] ", ""))
         purposes.append((f"{p} {'✓' if on else '✗'}", "green" if on else "dim"))
-    lines.append(_truncate(purposes, width))
-    lines.append([])
-    lines.append([("  DATASETS", "bold"), (f"  {len(s._datasets)}", "dim")])
-    if not s._datasets:
-        lines.append(_truncate(
-            [("    no datasets yet — X extracts the gated overlay", "dim")],
-            width))
-    cur = int(getattr(s, "_fly_cursor", 0))   # global: datasets then runs
-    for i, m in enumerate(s._datasets):
-        focused = (i == cur)
+    rows.append({"kind": "note", "spans": purposes})
+    rows.append({"kind": "note", "spans": []})
+    show_arch = bool(getattr(s, "_fly_show_archived", False))
+    ds_arch = list(getattr(s, "_datasets_archived", []) or [])
+
+    def arch_note(n: int) -> str:
+        return (f" · {n} archived ({'shown' if show_arch else 'h shows'})"
+                if n else "")
+
+    rows.append({"kind": "header",
+                 "spans": [("  DATASETS", "bold"),
+                           (f"  {len(s._datasets)}"
+                            f"{arch_note(len(ds_arch))}", "dim")]})
+    if not s._datasets and not (show_arch and ds_arch):
+        rows.append({"kind": "note", "spans": [
+            ("    no datasets yet — X extracts the gated overlay", "dim")]})
+    for m in list(s._datasets) + (ds_arch if show_arch else []):
+        archived = m.get("_lifecycle") == "archived"
         counts = m.get("counts") or {}
         spines = m.get("spines") or []
-        row: Line = [("  > " if focused else "    ", ""),
-                     (str(m.get("dataset_id") or "?"),
-                      "bold" if focused else ""),
-                     (f"   {counts.get('examples', 0)} examples", "dim"),
-                     (f"  ·  {sum(1 for sp in spines if sp.get('eligible'))}"
-                      f"/{len(spines)} spines", "dim")]
-        lines.append(_truncate(row, width))
-        vocab = m.get("class_vocabulary") or {}
-        if focused and vocab:
-            # The selected row's detail: the full class vocabulary, wrapped —
-            # the single-line stat dump this replaces truncated off-screen.
-            words = [f"{k}x{v}" for k, v in sorted(vocab.items())]
-            for chunk in _wrap_tokens(words, max(20, width - 8)):
-                lines.append([("        " + chunk, "dim")])
-    lines.append([])
+        spans: Line = [("  ", ""),
+                       (str(m.get("dataset_id") or "?"),
+                        "dim" if archived else ""),
+                       (f"   {counts.get('examples', 0)} examples", "dim"),
+                       (f"  ·  {sum(1 for sp in spines if sp.get('eligible'))}"
+                        f"/{len(spines)} spines", "dim")]
+        if archived:
+            spans.append(("  ⌂ archived", "dim"))
+        rows.append({"kind": "item", "spans": spans, "key": ("dataset", m)})
+    rows.append({"kind": "note", "spans": []})
     runs = list(getattr(s, "_runs", []) or [])
-    lines.append([("  TRAINING RUNS", "bold"), (f"  {len(runs)}", "dim")])
+    run_arch = list(getattr(s, "_runs_archived", []) or [])
+    rows.append({"kind": "header",
+                 "spans": [("  TRAINING RUNS", "bold"),
+                           (f"  {len(runs)}{arch_note(len(run_arch))}",
+                            "dim")]})
     if getattr(s, "_finetune_busy", False):
-        lines.append(_truncate(
-            [("    ⚙ training… the manifest lands when the run finishes",
-              "yellow")], width))
-    elif not runs:
-        lines.append(_truncate(
-            [("    none yet — T finetunes the selected dataset", "dim")],
-            width))
-    for j, m in enumerate(runs[:10]):
-        focused = (j + len(s._datasets) == cur)
+        rows.append({"kind": "note", "spans": [
+            ("    ⚙ training… the manifest lands when the run finishes",
+             "yellow")]})
+    elif not runs and not (show_arch and run_arch):
+        rows.append({"kind": "note", "spans": [
+            ("    none yet — T finetunes the selected dataset", "dim")]})
+    for m in runs + (run_arch if show_arch else []):
+        archived = m.get("_lifecycle") == "archived"
         base = str((m.get("base_model") or {}).get("model_id") or "?")
-        row = [("  > " if focused else "    ", ""),
-               (str(m.get("run_id") or "?"), "bold" if focused else ""),
-               (f"   {base}", "dim"),
-               (f"  ·  ds …{str(m.get('dataset_id') or '?')[-12:]}", "dim")]
+        spans = [("  ", ""),
+                 (str(m.get("run_id") or "?"), "dim" if archived else ""),
+                 (f"   {base}", "dim"),
+                 (f"  ·  ds …{str(m.get('dataset_id') or '?')[-12:]}", "dim")]
         totals = ((m.get("counts") or {}).get("totals") or {}).get("train") or {}
         n = sum(v for v in totals.values() if isinstance(v, (int, float)))
         if n:
-            row.append((f"  ·  {n} train ex", "dim"))
+            spans.append((f"  ·  {n} train ex", "dim"))
         metrics = (m.get("eval") or {}).get("metrics") or {}
         for k, v in list(metrics.items())[:2]:
-            row.append((f"  ·  {k} {v:.3f}" if isinstance(v, float)
-                        else f"  ·  {k} {v}", "green"))
-        lines.append(_truncate(row, width))
-        if focused:
-            # The selected run's RECIPE (df0b72c2): what T would re-run.
-            classes = m.get("classes") or []
-            if classes:
-                lines.append(_truncate(
-                    [("        classes: " + " ".join(str(c) for c in classes),
-                      "green")], width))
-            cfg = m.get("config") or {}
-            excl = cfg.get("exclude_labels") or []
-            if excl:
-                for w_i, chunk in enumerate(
-                        _wrap_tokens([str(x) for x in excl],
-                                     max(20, width - 17))):
-                    pre = "        exclude: " if w_i == 0 else "                 "
-                    lines.append(_truncate([(pre + chunk, "dim")], width))
-            lines.append(_truncate(
-                [(f"        epochs {cfg.get('max_epochs', '?')}"
-                  f" · lr {cfg.get('learning_rate', '?')}"
-                  f" · batch {cfg.get('batch_size', '?')}"
-                  f" · seed {cfg.get('seed', '?')}"
-                  f"  ·  T re-runs this recipe", "dim")], width))
+            spans.append((f"  ·  {k} {v:.3f}" if isinstance(v, float)
+                          else f"  ·  {k} {v}", "green"))
+        if archived:
+            spans.append(("  ⌂ archived", "dim"))
+        rows.append({"kind": "item", "spans": spans, "key": ("run", m)})
     if s._flywheel_log:
-        lines.append([])
-        lines.append([("  last extract:", "bold")])
+        rows.append({"kind": "note", "spans": []})
+        rows.append({"kind": "note", "spans": [("  last extract:", "bold")]})
         for ln in s._flywheel_log[-14:]:
-            lines.append(_truncate([("    " + ln, "dim")], width))
+            rows.append({"kind": "note", "spans": [("    " + ln, "dim")]})
+    return rows
+
+
+def flywheel_detail(s: Any) -> List[Line]:
+    """The focused flywheel row's drill block: a dataset's full class
+    vocabulary (wrapped — the off-screen truncation this pattern replaced),
+    a run's RECIPE (df0b72c2: what T re-runs). Repainted alone on cursor
+    moves through the kit detail pane."""
+    items = list(getattr(s, "_fly_items", []) or [])
+    cur = int(getattr(s, "_fly_cursor", 0))
+    if not items or not (0 <= cur < len(items)):
+        return []
+    kind, m = items[cur]
+    lines: List[Line] = []
+    if kind == "dataset":
+        vocab = m.get("class_vocabulary") or {}
+        if not vocab:
+            return []
+        lines.append([("class vocabulary:", "bold")])
+        words = [f"{k}x{v}" for k, v in sorted(vocab.items())]
+        for chunk in _wrap_tokens(words, 96):
+            lines.append([("  " + chunk, "dim")])
+        return lines
+    classes = m.get("classes") or []
+    if classes:
+        lines.append([("classes: " + " ".join(str(c) for c in classes),
+                       "green")])
+    cfg = m.get("config") or {}
+    excl = cfg.get("exclude_labels") or []
+    if excl:
+        for w_i, chunk in enumerate(_wrap_tokens([str(x) for x in excl], 90)):
+            lines.append([(("exclude: " if w_i == 0 else "         ") + chunk,
+                           "dim")])
+    lines.append([(f"epochs {cfg.get('max_epochs', '?')}"
+                   f" · lr {cfg.get('learning_rate', '?')}"
+                   f" · batch {cfg.get('batch_size', '?')}"
+                   f" · seed {cfg.get('seed', '?')}"
+                   f"  ·  T re-runs this recipe", "dim")])
     return lines
-
-
-def flywheel_status(s: Any) -> str:
-    busy = "extracting…  ·  " if s._extract_busy else ""
-    return (f"flywheel ({len(s._datasets)} datasets)  ·  {busy}"
-            "1-9 purposes · X extract · F back · q quit")
-
-
-def _truncate(line: Line, width: int) -> Line:
-    out: Line = []
-    used = 0
-    for t, st in line:
-        if used + len(t) <= width:
-            out.append((t, st))
-            used += len(t)
-        else:
-            out.append((t[:max(0, width - used)], st))
-            break
-    return out
 
 
 # ---- HTML materialization ------------------------------------------------
@@ -665,11 +735,14 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
         rows.append(e("quit_app", "q", "quit", "Picker"))
         return rows
     if s.stage == "flywheel":
-        return [e("next", "j/k", "walk datasets", "Flywheel"),
+        return [e("next", "j/k", "walk rows", "Flywheel"),
                 e("purpose_pick", "1-9", "toggle purpose", "Flywheel"),
                 e("extract_dataset", "X", "extract dataset", "Flywheel"),
                 e("train_dataset", "T", "finetune (run row: re-run recipe)",
                   "Flywheel"),
+                e("lifecycle_toggle", "a", "archive/unarchive row", "Lifecycle"),
+                e("lifecycle_archived", "h", "show archived", "Lifecycle"),
+                e("lifecycle_delete", "x", "delete (archived, twice)", "Lifecycle"),
                 e("flywheel_page", "F/esc", "back", "Flywheel"),
                 e("quit_app", "q", "quit", "Flywheel")]
     if s.lane == "assign":

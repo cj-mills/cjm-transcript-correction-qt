@@ -31,8 +31,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_context_graph_layer.journal import sidecar_journal_path
 from cjm_substrate.core.workspace import resolve_workspace
-from cjm_substrate.utils.lifecycle import partition_lifecycle
+from cjm_substrate.utils.lifecycle import (artifact_id, ArtifactLifecycle, find_holders,
+                                           LifecycleRefusal, partition_lifecycle)
 from cjm_substrate_qt_kit.keyhints import hint_line, keycaps, KeyHintsOverlay
+from cjm_substrate_qt_kit.pickerlist import PickerList
 from cjm_substrate_qt_kit.player import SpanPlayer
 from cjm_substrate_qt_kit.statusstrip import StatusStrip
 from cjm_substrate_qt_kit.theme import make_font
@@ -93,6 +95,7 @@ class CorrectionWindow(QMainWindow):
     stack_opened = Signal(object)    # loop-thread Future -> Qt thread (queued)
     sources_listed = Signal(object)
     statuses_done = Signal(object)
+    collections_done = Signal(object)
     spines_listed = Signal(object)
     spine_opened = Signal(object)
     gesture_done = Signal(object)    # every commit gesture resolves through here
@@ -132,6 +135,17 @@ class CorrectionWindow(QMainWindow):
         self._discovered = False   # discovery landed — the picker may paint
         self._status: Dict[str, Dict[str, int]] = {}
         self._purposes: Dict[str, Dict[str, int]] = {}
+        # Collections (8d29f0f0): the hub's grouping corpus, joined here so
+        # the source picker groups its rows — empty = flat listing.
+        self._collections: List[Dict[str, Any]] = []
+        self._coll_members: Dict[str, List[Tuple[str, str]]] = {}
+        self._coll_order: Dict[str, List[str]] = {}
+        self._picker_items: List[Tuple[str, str]] = []   # grouped open order
+        self._fly_items: List[Tuple[str, Any]] = []      # ("dataset"|"run", manifest)
+        self._datasets_archived: List[Dict[str, Any]] = []
+        self._runs_archived: List[Dict[str, Any]] = []
+        self._fly_show_archived = False
+        self._fly_delete_armed: Optional[str] = None     # the x two-step (_path)
         self._datasets: List[Dict[str, Any]] = []
         self._flywheel_log: List[str] = []
         self._flywheel_return = "select"
@@ -207,6 +221,7 @@ class CorrectionWindow(QMainWindow):
         self.stack_opened.connect(self._on_stack_opened)
         self.sources_listed.connect(self._on_sources_listed)
         self.statuses_done.connect(self._on_statuses_done)
+        self.collections_done.connect(self._on_collections_done)
         self.spines_listed.connect(self._on_spines_listed)
         self.spine_opened.connect(self._on_spine_opened)
         self.gesture_done.connect(self._on_gesture_done)
@@ -241,6 +256,13 @@ class CorrectionWindow(QMainWindow):
         self.cards.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.cards.setFont(make_font(kind="mono"))
         self.cards.viewport().installEventFilter(self)
+        # The three list stages paint on the kit PickerList (8d29f0f0):
+        # native click-to-cursor / double-click open / wheel + scrollbar
+        # page scroll / ensure-visible keyboard follow; the cards pane keeps
+        # the correct stage's center-pinned walk.
+        self.picker = PickerList(on_cursor=self._on_picker_cursor,
+                                 on_activate=self._on_picker_activate)
+        self.picker.setVisible(False)
         self.editor = QLineEdit()
         self.editor.setVisible(False)
         self.editor.returnPressed.connect(self._on_editor_submitted)
@@ -253,6 +275,7 @@ class CorrectionWindow(QMainWindow):
         self.transfer_dialog = TransferDialog(
             self, on_plan=self._plan_transfer, on_commit=self._commit_transfer)
         lay.addWidget(self.cards, 1)
+        lay.addWidget(self.picker, 1)
         lay.addWidget(self.editor)
         lay.addWidget(self.strip)
         self.setCentralWidget(central)
@@ -266,7 +289,9 @@ class CorrectionWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if self.view is not None or self.stage in ("select", "spine", "flywheel"):
+        # Only the character-cell cards canvas re-derives on geometry; the
+        # picker stages are native widgets and lay themselves out.
+        if self.stage == "correct" and self.view is not None:
             self._render()
 
     def focusNextPrevChild(self, next_: bool) -> bool:
@@ -394,23 +419,13 @@ class CorrectionWindow(QMainWindow):
         return " ".join(out)
 
     def _render(self) -> None:
-        width, height = self._cells()
-        if self.stage == "select":
-            if not self._discovered:
+        if self.stage in ("select", "spine", "flywheel"):
+            if self.stage == "select" and not self._discovered:
                 return   # boot ladder still running — keep the loading status
-            self.cards.setHtml(panes.lines_to_html(panes.picker_lines(self, width)))
-            self._paint_frame()
+            self._render_picker()
             return
-        if self.stage == "spine":
-            self.cards.setHtml(panes.lines_to_html(
-                panes.spine_picker_lines(self, width)))
-            self._paint_frame()
-            return
-        if self.stage == "flywheel":
-            self.cards.setHtml(panes.lines_to_html(
-                panes.flywheel_lines(self, width)))
-            self._paint_frame()
-            return
+        self._show_picker(False)
+        width, height = self._cells()
         view = self.view
         if view is None:
             return
@@ -421,6 +436,63 @@ class CorrectionWindow(QMainWindow):
         self.cards.setHtml(panes.lines_to_html(
             panes.render_rows(self, width, height)))
         self._paint_frame()
+
+    def _show_picker(self, on: bool) -> None:
+        """Swap the central pane: the kit PickerList on the three list
+        stages, the cards canvas on a spine."""
+        if self.picker.isVisible() != on:
+            self.picker.setVisible(on)
+        if self.cards.isVisible() != (not on):
+            self.cards.setVisible(not on)
+
+    def _render_picker(self) -> None:
+        """Rebuild the active list stage's rows (kit PickerList, 8d29f0f0):
+        rows re-derive from state, the cursor positions silently (clamped
+        against the fresh listing), the focused-row detail repaints. Cursor
+        MOVES never come back here — _on_picker_cursor repaints the detail
+        pane alone (the ba21e0b8 full-repaint class, avoided)."""
+        if self.stage == "select":
+            rows = panes.picker_rows(self)
+            self._picker_items = [r["key"] for r in rows
+                                  if (r.get("kind") or "item") == "item"]
+            self.cursor = max(0, min(max(0, len(self._picker_items) - 1),
+                                     self.cursor))
+            self.picker.set_rows(rows, cursor=self.cursor)
+            self.picker.set_detail(panes.picker_detail(self))
+        elif self.stage == "spine":
+            self.cursor = max(0, min(max(0, len(self._spines) - 1),
+                                     self.cursor))
+            self.picker.set_rows(panes.spine_picker_rows(self),
+                                 cursor=self.cursor)
+            self.picker.set_detail(None)
+        else:
+            rows = panes.flywheel_rows(self)
+            self._fly_items = [r["key"] for r in rows
+                               if (r.get("kind") or "item") == "item"]
+            self._fly_cursor = max(0, min(max(0, len(self._fly_items) - 1),
+                                          self._fly_cursor))
+            self.picker.set_rows(rows, cursor=self._fly_cursor)
+            self.picker.set_detail(panes.flywheel_detail(self))
+        self._show_picker(True)
+        self._paint_frame()
+
+    def _on_picker_cursor(self, i: int) -> None:
+        """Click-to-cursor / keyboard follow landing: sync the stage's
+        cursor state and repaint the detail pane alone."""
+        if self.stage == "flywheel":
+            self._fly_cursor = i
+            self._fly_delete_armed = None
+            self.picker.set_detail(panes.flywheel_detail(self))
+        elif self.stage in ("select", "spine"):
+            self.cursor = i
+            if self.stage == "select":
+                self.picker.set_detail(panes.picker_detail(self))
+
+    def _on_picker_activate(self, key) -> None:
+        """Double-click (or enter through the key table): open the cursor
+        row on the pickers; the flywheel's rows act through T/a/h/x."""
+        if self.stage in ("select", "spine"):
+            self.action_open_source()
 
     # ---- the boot ladder (the Textual on_mount, future-chained) ----------
 
@@ -460,6 +532,19 @@ class CorrectionWindow(QMainWindow):
             return
         self._status = res["status"]
         self._purposes = res["purposes"]
+        f = self.sess.collections()   # the grouping corpus rides the ladder
+        f.add_done_callback(self.collections_done.emit)
+
+    def _on_collections_done(self, fut) -> None:
+        try:
+            res = fut.result()
+        except Exception:
+            # No Collections (or a read failure) = the flat listing; the
+            # picker never blocks on the grouping corpus.
+            res = {"collections": [], "members": {}, "order": {}}
+        self._collections = res["collections"]
+        self._coll_members = res["members"]
+        self._coll_order = res["order"]
         self._discovered = True
         self.cursor = 0
         self._render()
@@ -647,6 +732,9 @@ class CorrectionWindow(QMainWindow):
         add("F", "flywheel_page", self.action_flywheel_page)
         add("X", "extract_dataset", self.action_extract_dataset)
         add("T", "train_dataset", self.action_train_dataset)
+        add("a", "lifecycle_toggle", self.action_fly_lifecycle_toggle)
+        add("h", "lifecycle_archived", self.action_fly_show_archived)
+        add("x", "lifecycle_delete", self.action_fly_delete)
         add("x", "export_wordless", self.action_export_wordless)
         add("t", "transfer_wordless", self.action_transfer_wordless)
         add("enter", "open_source", self.action_open_source)
@@ -671,6 +759,8 @@ class CorrectionWindow(QMainWindow):
         if self.stage == "flywheel":
             return action in ("flywheel_page", "extract_dataset", "purpose_pick",
                               "train_dataset", "next", "prev",
+                              "lifecycle_toggle", "lifecycle_archived",
+                              "lifecycle_delete",
                               "back", "quit_app")
         if action in ("back", "flywheel_page"):
             return True   # shell navigation — lane-universal (f27f2b99),
@@ -885,24 +975,10 @@ class CorrectionWindow(QMainWindow):
     # ---- movement + sidecar ---------------------------------------------
 
     def _move(self, delta: int) -> None:
-        if self.stage == "select":
-            if self._sources:
-                self.cursor = max(0, min(len(self._sources) - 1,
-                                         self.cursor + delta))
-                self._render()
-            return
-        if self.stage == "spine":
-            if self._spines:
-                self.cursor = max(0, min(len(self._spines) - 1,
-                                         self.cursor + delta))
-                self._render()
-            return
-        if self.stage == "flywheel":
-            total = len(self._datasets) + len(self._runs)
-            if total:
-                self._fly_cursor = max(0, min(total - 1,
-                                              self._fly_cursor + delta))
-                self._render()
+        if self.stage in ("select", "spine", "flywheel"):
+            # The picker owns clamping + ensure-visible; state syncs and the
+            # detail repaints through _on_picker_cursor — no list rebuild.
+            self.picker.move(delta)
             return
         if self.view is None:
             return
@@ -2221,9 +2297,9 @@ class CorrectionWindow(QMainWindow):
                            skeleton=selector, spines=len(self._spines))
             self._open_spine(sid, title, selector)
             return
-        if self.stage != "select" or not self._sources:
+        if self.stage != "select" or not self._picker_items:
             return
-        sid, title = self._sources[self.cursor]
+        sid, title = self._picker_items[self.cursor]   # the GROUPED order
         self._open_source(sid, title)
 
     def action_flywheel_page(self) -> None:
@@ -2244,9 +2320,7 @@ class CorrectionWindow(QMainWindow):
         self._paint_status("")   # leaving the stage: its readout is done
         self._load_datasets()
         self._load_runs()
-        self._fly_cursor = min(self._fly_cursor,
-                               max(0, len(self._datasets)
-                                   + len(self._runs) - 1))
+        self._fly_delete_armed = None   # _render_picker clamps the cursor
         fut = self.sess.purposes()
 
         def done(f):
@@ -2391,6 +2465,86 @@ class CorrectionWindow(QMainWindow):
             self._include_purposes.add(p)
         self._render()
 
+    # ---- flywheel artifact lifecycle (b20cb911: the dataset-verb rung) ----
+
+    def _fly_current(self) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """The cursored ("dataset"|"run", manifest) pair, or None."""
+        i = self._fly_cursor
+        return self._fly_items[i] if 0 <= i < len(self._fly_items) else None
+
+    def action_fly_lifecycle_toggle(self) -> None:
+        """a on a flywheel row: archive an active dataset/run, unarchive an
+        archived one — the substrate sidecar seam, the decomp m-picker
+        gesture grammar verbatim (DEC 3760558f)."""
+        if self.stage != "flywheel":
+            return
+        cur = self._fly_current()
+        if cur is None:
+            return
+        _kind, m = cur
+        self._fly_lifecycle(m, "unarchive" if m.get("_lifecycle") == "archived"
+                            else "archive")
+
+    def action_fly_show_archived(self) -> None:
+        """h: show/hide the archived rows (dimmed, chipped ⌂ — hidden by
+        default so dead artifacts stop diluting the sections)."""
+        if self.stage != "flywheel":
+            return
+        self._fly_show_archived = not self._fly_show_archived
+        self._fly_delete_armed = None
+        self._render()
+
+    def action_fly_delete(self) -> None:
+        """x twice on an ARCHIVED row: delete outright (the seam refuses
+        loud while anything under the workspace still names the artifact);
+        an active row refuses — a archives it first. Any cursor move or
+        other lifecycle verb disarms the two-step."""
+        if self.stage != "flywheel":
+            return
+        cur = self._fly_current()
+        if cur is None:
+            return
+        _kind, m = cur
+        if m.get("_lifecycle") != "archived":
+            self._fly_delete_armed = None
+            self._paint_status("delete serves ARCHIVED rows only — "
+                               "a archives it first")
+            return
+        if self._fly_delete_armed == m.get("_path"):
+            self._fly_lifecycle(m, "delete")
+            return
+        self._fly_delete_armed = str(m.get("_path") or "")
+        self._paint_status("x again: DELETE this archived artifact from disk "
+                           "· any other move cancels")
+
+    def _fly_lifecycle(self, m: Dict[str, Any], verb: str) -> None:
+        """Drive the substrate lifecycle seam for the cursored dataset or
+        training run (b20cb911, DEC 3760558f): a sidecar beside the
+        manifest, never the manifest itself; delete scans the WORKSPACE for
+        holders and the refusal names each one."""
+        lc = ArtifactLifecycle(Path(str(m.get("_path") or "")).parent)
+        rid = str(m.get("dataset_id") or m.get("run_id") or "?")[-12:]
+        try:
+            if verb == "delete":
+                ws = resolve_workspace()
+                root = ws.root if ws is not None else lc.dir.parent.parent
+                holders = find_holders(root, artifact_id(lc.dir),
+                                       exclude_dir=lc.dir)
+                lc.delete(holders=holders)
+                note = f"deleted …{rid}"
+            else:
+                rec, changed = getattr(lc, verb)(
+                    actor="user:correction-qt",
+                    reason=f"{verb}d on the flywheel page")
+                note = f"…{rid} {rec['state']}" + ("" if changed else " (already)")
+        except LifecycleRefusal as e:
+            note = f"refused: {e}"
+        self._fly_delete_armed = None
+        self._load_datasets()
+        self._load_runs()
+        self._render()
+        self._paint_status(note)
+
     def _load_datasets(self) -> None:
         ws = resolve_workspace()
         root = (ws.root / "datasets") if ws is not None else Path("datasets")
@@ -2411,8 +2565,9 @@ class CorrectionWindow(QMainWindow):
             rows.append(m)
         rows.sort(key=lambda m: float(m.get("created_at") or 0.0), reverse=True)
         # Lifecycle (b20cb911): an archived dataset leaves the ring — the
-        # substrate sidecar seam the decomp indexes filter through too.
-        self._datasets, _archived = partition_lifecycle(rows)
+        # substrate sidecar seam the decomp indexes filter through too; the
+        # archived half stays listable (h) and unarchivable (a) in place.
+        self._datasets, self._datasets_archived = partition_lifecycle(rows)
 
     def _load_runs(self) -> None:
         """Training-run manifests, newest first — manifest-driven discovery
@@ -2440,9 +2595,9 @@ class CorrectionWindow(QMainWindow):
         rows.sort(key=lambda m: float(m.get("created_at") or 0.0),
                   reverse=True)
         # Lifecycle (b20cb911): archived runs leave the flywheel list — the
-        # decomp app's m picker archives/unarchives them (or the CLI:
-        # python -m cjm_substrate.utils.lifecycle).
-        self._runs, _archived = partition_lifecycle(rows)
+        # a/h/x verbs here (and the decomp app's m picker, and the CLI
+        # python -m cjm_substrate.utils.lifecycle) manage both halves.
+        self._runs, self._runs_archived = partition_lifecycle(rows)
 
     # ---- the respine verbs (9af9793a: spine picker x / t) -----------------
 
@@ -2562,13 +2717,17 @@ class CorrectionWindow(QMainWindow):
             return
         schema = adapter_config_schema(self.sess.manifests_dir,
                                        "audio_event_detection_finetune")
-        i = self._fly_cursor
-        if i < len(self._datasets):
-            self.finetune_form.open_for(self._datasets[i], schema,
+        cur = self._fly_current()
+        kind, m = cur if cur is not None else ("dataset", None)
+        if m is not None and m.get("_lifecycle") == "archived":
+            self._paint_status("archived rows are not trainable — a unarchives")
+            return
+        if kind == "dataset":
+            self.finetune_form.open_for(m if m is not None
+                                        else self._datasets[0], schema,
                                         datasets=self._datasets)
             return
-        run = self._runs[min(i - len(self._datasets),
-                             len(self._runs) - 1)]
+        run = m
         did = str(run.get("dataset_id") or "")
         dataset = next((m for m in self._datasets
                         if m.get("dataset_id") == did), None)

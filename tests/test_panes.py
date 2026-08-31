@@ -4,6 +4,7 @@ net-new panes extraction): card gutter glyphs and chips, the folded
 one-liner, the center-pin row math, lane-scoped status lines, pickers,
 flywheel, and the HTML materialization."""
 
+import re
 from types import SimpleNamespace
 
 from cjm_transcript_correction_qt import panes
@@ -173,35 +174,122 @@ def test_gate_chip_states():
     assert panes.gate_chip(view) == "gate ✔12.5s"
 
 
-def test_picker_lines_status_and_purpose_mix():
+def flat_rows(rows):
+    return "\n".join("".join(t for t, _ in r["spans"]) for r in rows)
+
+
+def test_picker_rows_flat_status_and_purpose_mix():
     s = SimpleNamespace(
         _sources=[("id1", "Interview A"), ("id2", "Interview B")],
         _status={"id1": {"segments": 10, "corrections": 2, "marks": 1}},
         _purposes={"id1": {"genuine": 3, "feature-test": 1},
                    "id2": {"feature-test": 2}},
         cursor=0, _graph_db_path="/very/long/path/to/graph.db")
-    lines = panes.picker_lines(s, width=120)
-    joined = "\n".join(flat(ln) for ln in lines)
-    assert "  > " in joined and "Interview A" in joined
+    rows = panes.picker_rows(s)
+    joined = flat_rows(rows)
+    assert "Interview A" in joined
     assert "genuine: 3" in joined and "(+1 test)" in joined
     assert "all test" in joined
-    assert "pick a source (2)" in panes.picker_status(s)
+    # no collections = flat: every row pickable, keys carry the open order
+    assert [r["key"] for r in rows] == [("id1", "Interview A"),
+                                        ("id2", "Interview B")]
+    assert all((r.get("kind") or "item") == "item" for r in rows)
 
 
-def test_flywheel_lines_purposes_and_datasets():
+def test_picker_rows_group_under_collections_with_unfiled_tail():
+    s = SimpleNamespace(
+        _sources=[("id1", "B Interview"), ("id2", "A Interview"),
+                  ("id3", "Loose One")],
+        _status={}, _purposes={},
+        _collections=[{"id": "c1", "title": "Season One",
+                       "status": "proposed"}],
+        _coll_members={"c1": [("id1", "B Interview"), ("id2", "A Interview")]},
+        _coll_order={"c1": ["id1"]},   # chain covers id1; id2 = tail
+        cursor=0)
+    rows = panes.picker_rows(s)
+    kinds = [(r.get("kind") or "item") for r in rows]
+    assert kinds == ["header", "item", "item", "header", "item"]
+    assert "Season One" in flat_rows(rows[:1]) and "⚑ proposed" in flat_rows(rows[:1])
+    # chain order first (id1), unordered tail after (id2), unfiled last
+    items = [r["key"] for r in rows if (r.get("kind") or "item") == "item"]
+    assert items == [("id1", "B Interview"), ("id2", "A Interview"),
+                     ("id3", "Loose One")]
+    assert "Unfiled" in flat_rows(rows)
+
+
+def test_picker_detail_identity_block():
+    s = SimpleNamespace(
+        _sources=[("id1", "Interview A")],
+        _status={"id1": {"segments": 10, "corrections": 2, "marks": 1}},
+        _purposes={"id1": {"genuine": 3}},
+        _collections=[{"id": "c1", "title": "Season One", "status": "active"}],
+        _coll_members={"c1": [("id1", "Interview A")]}, _coll_order={},
+        _picker_items=[("id1", "Interview A")], cursor=0)
+    joined = "\n".join(flat(ln) for ln in panes.picker_detail(s))
+    assert "Interview A" in joined and "id1" in joined
+    assert "10 segments" in joined and "1 ⚑ open marks" in joined
+    assert "genuine 3" in joined
+    assert "collections: Season One" in joined
+
+
+def test_spine_picker_rows_carry_created_at():
+    s = SimpleNamespace(
+        _spine_source=("id1", "Interview A"),
+        _spines=[{"skeleton_hash": None, "split_policy": None, "segments": 8},
+                 {"skeleton_hash": "sha256:abcdef1234567890",
+                  "split_policy": "sentence-v1", "segments": 12,
+                  "created_at": 1756500000.0}],
+        cursor=0)
+    rows = panes.spine_picker_rows(s)
+    assert "2 spines coexist" in flat_rows(rows)
+    items = [r for r in rows if (r.get("kind") or "item") == "item"]
+    assert [r["key"] for r in items] == [0, 1]
+    legacy, split = (flat_rows([r]) for r in items)
+    assert "vad-only (pre-split)" in legacy
+    assert "  ·  20" not in legacy          # no stamp = no date chunk
+    assert "sentence-v1" in split
+    assert re.search(r"  ·  20\d\d-\d\d-\d\d \d\d:\d\d", split)
+
+
+def test_flywheel_rows_purposes_and_datasets():
+    ds = {"dataset_id": "ds-1", "counts": {"examples": 12},
+          "class_vocabulary": {"inhale": 9},
+          "spines": [{"eligible": True}, {}]}
     s = SimpleNamespace(
         _purpose_vocab=["feature-test", "wordless-transfer"],
         _include_purposes={"genuine", "wordless-transfer"},
-        _datasets=[{"dataset_id": "ds-1", "counts": {"examples": 12},
-                    "class_vocabulary": {"inhale": 9},
-                    "spines": [{"eligible": True}, {}]}],
+        _datasets=[ds], _runs=[], _fly_cursor=0,
         _flywheel_log=["gate: 1/2 spines eligible"], _extract_busy=False)
-    joined = "\n".join(flat(ln) for ln in panes.flywheel_lines(s, width=120))
-    assert "FLYWHEEL" in joined
+    rows = panes.flywheel_rows(s)
+    joined = flat_rows(rows)
     assert "feature-test ✗" in joined and "wordless-transfer ✓" in joined
-    assert "ds-1" in joined and "inhalex9" in joined and "1/2 spines" in joined
+    assert "ds-1" in joined and "1/2 spines" in joined
     assert "gate: 1/2 spines eligible" in joined
-    assert "1-9 purposes" in panes.flywheel_status(s)
+    assert [r["key"] for r in rows
+            if (r.get("kind") or "item") == "item"] == [("dataset", ds)]
+    # the vocabulary moved to the detail pane (kit PickerList seam)
+    s._fly_items = [("dataset", ds)]
+    detail = "\n".join(flat(ln) for ln in panes.flywheel_detail(s))
+    assert "inhalex9" in detail
+
+
+def test_flywheel_rows_archived_ride_when_shown():
+    active = {"dataset_id": "ds-live", "counts": {}, "spines": []}
+    dead = {"dataset_id": "ds-dead", "counts": {}, "spines": [],
+            "_lifecycle": "archived"}
+    s = SimpleNamespace(_purpose_vocab=[], _include_purposes={"genuine"},
+                        _datasets=[active], _datasets_archived=[dead],
+                        _runs=[], _runs_archived=[], _fly_cursor=0,
+                        _flywheel_log=[], _extract_busy=False)
+    hidden = panes.flywheel_rows(s)
+    assert "ds-dead" not in flat_rows(hidden)
+    assert "1 archived (h shows)" in flat_rows(hidden)
+    s._fly_show_archived = True
+    shown = panes.flywheel_rows(s)
+    joined = flat_rows(shown)
+    assert "ds-dead" in joined and "⌂ archived" in joined
+    keys = [r["key"] for r in shown if (r.get("kind") or "item") == "item"]
+    assert keys == [("dataset", active), ("dataset", dead)]
 
 
 def test_wrap_spans_preserves_styles_across_lines():

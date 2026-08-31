@@ -85,6 +85,15 @@ def install_stubs(tmp: Path):
     async def fake_purposes(queue, cap):
         return {"src-1": {"genuine": 2}}
 
+    async def fake_collections(queue, cap):
+        return [{"id": "coll-1", "title": "Probe Season", "status": "active"}]
+
+    async def fake_members(queue, cap, cid):
+        return [("src-1", "Probe Talk")]
+
+    async def fake_order(queue, cap, cid, member_ids):
+        return ["src-1"], []
+
     async def fake_spines(queue, cap, sid, *, rendition_selector=None):
         return [{"skeleton_hash": None, "segments": 3},
                 {"skeleton_hash": "sha256:abc", "split_policy": "sentence-split/v1",
@@ -105,6 +114,9 @@ def install_stubs(tmp: Path):
     sess_mod.list_sources = fake_list_sources
     sess_mod.source_status = fake_status
     sess_mod.session_purposes_by_source = fake_purposes
+    sess_mod.list_collections = fake_collections
+    sess_mod.collection_members = fake_members
+    sess_mod.collection_order = fake_order
     sess_mod.list_source_spines = fake_spines
     sess_mod.start_session = fake_start_session
     sess_mod.list_speaker_entities = fake_entities
@@ -129,20 +141,25 @@ def main() -> int:
                                    autoplay=False)
     win.show()
 
-    # boot ladder -> source picker with statuses painted
-    pump(app, lambda: win._sources and win._status, "the source picker")
+    # boot ladder -> source picker: native PickerList (8d29f0f0) grouped
+    # under the stubbed collection, statuses + detail painted
+    pump(app, lambda: win._discovered, "the source picker")
     assert win.stage == "select"
     assert "pick a source (2)" in strip_text(win)
-    assert "Probe Talk" in win.cards.toPlainText()
-    assert "1 corrections" in win.cards.toPlainText()
+    assert win.picker.isVisible() and not win.cards.isVisible()
+    assert "Probe Season" in win.picker.plain_text()   # the collection header
+    assert "Unfiled" in win.picker.plain_text()        # src-2 has no home
+    assert "Probe Talk" in win.picker.plain_text()
+    assert "1 corrections" in win.picker.plain_text()
+    assert "src-1" in win.picker.detail.toPlainText()  # identity detail (2e0928f2)
 
     # walk the picker, open -> the spine picker (two skeletons coexist)
     win._move(1)
     win._move(-1)
     win.action_open_source()
     pump(app, lambda: win.stage == "spine", "the spine picker")
-    assert "2 spines coexist" in win.cards.toPlainText()
-    assert "vad-only (pre-split)" in win.cards.toPlainText()
+    assert "2 spines coexist" in win.picker.plain_text()
+    assert "vad-only (pre-split)" in win.picker.plain_text()
 
     # open the spine -> the walk, center-pinned card canvas + WALK status
     win.action_open_source()
@@ -219,9 +236,8 @@ def main() -> int:
     # stale-readout fix: a lane readout dies on the flywheel doorstep
     win._paint_status("opening Probe Talk…")
     win.action_flywheel_page()
-    pump(app, lambda: "FLYWHEEL" in win.cards.toPlainText(),
-         "the flywheel page")
-    assert win.stage == "flywheel"
+    pump(app, lambda: win.stage == "flywheel"
+         and "DATASETS" in win.picker.plain_text(), "the flywheel page")
     assert win.strip.readout.text() == ""
 
     # F returns to the INTACT lane (the seat survived the page swap)
@@ -249,9 +265,10 @@ def main() -> int:
 
     # ---- finetune launch (48eff28b + 99280f79): form -> seat -> runs -----
     win.action_flywheel_page()
-    pump(app, lambda: "FLYWHEEL" in win.cards.toPlainText(),
+    pump(app, lambda: win.stage == "flywheel"
+         and "DATASETS" in win.picker.plain_text(),
          "the flywheel page (finetune walk)")
-    assert "TRAINING RUNS" in win.cards.toPlainText()
+    assert "TRAINING RUNS" in win.picker.plain_text()
     win.action_train_dataset()
     assert "no datasets" in win.strip.readout.text()
 
@@ -273,7 +290,8 @@ def main() -> int:
     app_mod.adapter_config_schema = orig_schema_read
     dlg = win.finetune_form
     assert dlg.isVisible() and len(dlg._fields()) == 2
-    assert "dataset_probe" in dlg.view.toPlainText()
+    assert "dataset_probe" in dlg.body.plain_text()
+    assert "dataset_probe" in dlg.head.toPlainText()   # fixed header (d55292f9)
 
     # row 0 is the DATASET ring row (2026-08-27 form sitting) — no typed
     # editor there; schema fields start at row 1 (finding 1b540386: this
@@ -318,13 +336,13 @@ def main() -> int:
                   "counts": {"totals": {"train": {"speech": 3}}}}]
     win._fly_cursor = 1   # past the one dataset, onto the run row
     win._render()
-    assert "T re-runs this recipe" in win.cards.toPlainText()
+    assert "T re-runs this recipe" in win.picker.detail.toPlainText()
     app_mod.adapter_config_schema = lambda d, t: schema
     win.action_train_dataset()
     app_mod.adapter_config_schema = orig_schema_read
     assert dlg.isVisible()
     assert dlg.overrides() == {"max_epochs": 7}   # the recipe's diff
-    assert "recipe from run_adopt" in dlg.view.toPlainText()
+    assert "recipe from run_adopt" in dlg.head.toPlainText()
     dlg.reject()
     assert not dlg.isVisible()
 

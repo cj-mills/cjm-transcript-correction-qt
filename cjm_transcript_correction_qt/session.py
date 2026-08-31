@@ -31,6 +31,7 @@ from cjm_transcript_correction_core.cli import (commit_wordless_transfer, load_c
 from cjm_transcript_correction_core.graph import (list_source_spines, list_speaker_entities,
                                                   session_purposes_by_source, start_session)
 from cjm_transcript_correction_core.spine import list_sources, open_stack, source_status, SpineView
+from cjm_transcription_core.curation import collection_members, collection_order, list_collections
 
 
 class CorrectionShellSession(LoopThreadSession):
@@ -132,6 +133,26 @@ class CorrectionShellSession(LoopThreadSession):
         return self.submit(list_source_spines(self.queue,
                                               self.graph_capability, source_id,
                                               rendition_selector=rendition))
+
+    def collections(self) -> Future:
+        """The graph's Collections + membership + order (the hub's grouping
+        corpus): the source picker groups its rows under these (8d29f0f0).
+        Resolves to {"collections", "members", "order"} — curation.py shapes."""
+        return self.submit(self._collections())
+
+    async def _collections(self):
+        cols = await list_collections(self.queue, self.graph_capability)
+        members: Dict[str, List[Any]] = {}
+        order: Dict[str, List[str]] = {}
+        for c in cols:
+            ms = await collection_members(self.queue, self.graph_capability,
+                                          c["id"])
+            members[c["id"]] = ms
+            ordered, _ = await collection_order(self.queue,
+                                                self.graph_capability, c["id"],
+                                                [m for m, _ in ms])
+            order[c["id"]] = ordered
+        return {"collections": cols, "members": members, "order": order}
 
     # ---- the finetune seat (DEC 48eff28b) --------------------------------
 

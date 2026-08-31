@@ -58,18 +58,28 @@ def test_load_runs_filters_and_sorts(tmp_path, monkeypatch):
 def test_train_gating_and_flywheel_cursor():
     allowed = CorrectionWindow._allowed
     fly = SimpleNamespace(stage="flywheel", lane="walk")
-    for a in ("train_dataset", "next", "prev", "extract_dataset"):
+    for a in ("train_dataset", "next", "prev", "extract_dataset",
+              "lifecycle_toggle", "lifecycle_archived", "lifecycle_delete"):
         assert allowed(fly, a)
     assert not allowed(SimpleNamespace(stage="select", lane="walk"),
                        "train_dataset")
-    s = SimpleNamespace(stage="flywheel", _datasets=[1, 2, 3], _runs=[4, 5],
-                        _fly_cursor=0, _render=lambda: None)
+    assert not allowed(SimpleNamespace(stage="select", lane="walk"),
+                       "lifecycle_delete")
+    # list stages delegate the walk to the kit PickerList (8d29f0f0): the
+    # widget owns clamping + ensure-visible, _on_picker_cursor syncs state
+    moves = []
+    s = SimpleNamespace(stage="flywheel",
+                        picker=SimpleNamespace(move=moves.append))
     CorrectionWindow._move(s, 1)
-    CorrectionWindow._move(s, 1)
-    CorrectionWindow._move(s, 9)
-    assert s._fly_cursor == 4   # clamped over datasets + runs (df0b72c2)
     CorrectionWindow._move(s, -9)
-    assert s._fly_cursor == 0
+    assert moves == [1, -9]
+    sync = SimpleNamespace(stage="flywheel", _fly_cursor=0,
+                           _fly_delete_armed="armed",
+                           _fly_items=[], picker=SimpleNamespace(
+                               set_detail=lambda lines: None))
+    CorrectionWindow._on_picker_cursor(sync, 3)
+    assert sync._fly_cursor == 3
+    assert sync._fly_delete_armed is None   # a cursor move disarms x
 
 
 def test_action_train_dataset_paths(monkeypatch):
@@ -91,9 +101,12 @@ def test_action_train_dataset_paths(monkeypatch):
            "config": {"exclude_labels": ["empty", "click"]}}
     stray = {"run_id": "run_s", "dataset_id": "gone"}
 
-    def state(**kw):
+    def state(cursor=0, **kw):
+        # the cursored row resolves through _fly_items now (archived rows
+        # interleave when shown, so index math over the halves is gone)
         d = dict(stage="flywheel", _finetune_busy=False, _datasets=[ds],
-                 _runs=[run, stray], _fly_cursor=0,
+                 _runs=[run, stray], _fly_cursor=cursor,
+                 _fly_items=[("dataset", ds), ("run", run), ("run", stray)],
                  _paint_status=notes.append,
                  sess=SimpleNamespace(manifests_dir="/m"),
                  finetune_form=SimpleNamespace(
@@ -102,16 +115,18 @@ def test_action_train_dataset_paths(monkeypatch):
                      opened.append((d, adopt, adopt_label, datasets,
                                     adopt_classes))))
         d.update(kw)
-        return SimpleNamespace(**d)
+        s = SimpleNamespace(**d)
+        s._fly_current = lambda: CorrectionWindow._fly_current(s)
+        return s
 
     CorrectionWindow.action_train_dataset(state())
     assert opened[-1] == (ds, None, "", [ds], None)  # dataset row: defaults
-    CorrectionWindow.action_train_dataset(state(_fly_cursor=1))
+    CorrectionWindow.action_train_dataset(state(cursor=1))
     assert opened[-1] == (ds, {"exclude_labels": ["empty", "click"]},
                           "run_r", [ds], ["speech", "inhale"])
     #                    run row: recipe adopted + its TRAINED class set
     #                    (1275eb52); the ring passes either way
-    CorrectionWindow.action_train_dataset(state(_fly_cursor=2))
+    CorrectionWindow.action_train_dataset(state(cursor=2))
     assert "not in the list" in notes[-1]        # consumed dataset missing
 
 
@@ -162,7 +177,11 @@ def flat(lines):
     return "\n".join("".join(t for t, _ in ln) for ln in lines)
 
 
-def test_flywheel_lines_sections_and_detail():
+def flat_rows(rows):
+    return "\n".join("".join(t for t, _ in r["spans"]) for r in rows)
+
+
+def test_flywheel_rows_sections_and_detail():
     ds = {"dataset_id": "dataset_a", "counts": {"examples": 9},
           "class_vocabulary": {"inhale": 488, "click": 15},
           "spines": [{"eligible": True}, {"eligible": False}]}
@@ -171,24 +190,26 @@ def test_flywheel_lines_sections_and_detail():
            "config": {"exclude_labels": ["empty", "click"], "max_epochs": 20},
            "counts": {"totals": {"train": {"speech": 7, "inhale": 2}}},
            "eval": {"metrics": {"f1": 0.91}}}
-    text = flat(panes.flywheel_lines(fly_state(_datasets=[ds], _runs=[run]),
-                                     width=100))
+    s = fly_state(_datasets=[ds], _runs=[run])
+    rows = panes.flywheel_rows(s)
+    text = flat_rows(rows)
     assert "DATASETS" in text and "TRAINING RUNS" in text
-    assert "> dataset_a" in text          # cursor band
-    assert "inhalex488" in text           # detail block: vocab survives
+    assert "dataset_a" in text
     assert "run_z" in text and "f1 0.91" in text and "9 train ex" in text
-    # the cursor walks past the datasets into the runs; the recipe paints
-    on_run = flat(panes.flywheel_lines(
-        fly_state(_datasets=[ds], _runs=[run], _fly_cursor=1), width=100))
-    assert "> run_z" in on_run
+    # item keys are the app's _fly_items map: datasets then runs
+    items = [r["key"] for r in rows if (r.get("kind") or "item") == "item"]
+    assert items == [("dataset", ds), ("run", run)]
+    # the drill content lives in the kit detail pane now (8d29f0f0)
+    s._fly_items = items
+    on_ds = flat(panes.flywheel_detail(s))
+    assert "inhalex488" in on_ds
+    s._fly_cursor = 1
+    on_run = flat(panes.flywheel_detail(s))
     assert "classes: speech inhale" in on_run
     assert "exclude: empty click" in on_run
     assert "T re-runs this recipe" in on_run
-    busy = flat(panes.flywheel_lines(fly_state(_finetune_busy=True),
-                                     width=100))
+    busy = flat_rows(panes.flywheel_rows(fly_state(_finetune_busy=True)))
     assert "training…" in busy
-    narrow = panes.flywheel_lines(fly_state(_datasets=[ds]), width=40)
-    assert all(len("".join(t for t, _ in ln)) <= 40 for ln in narrow)
 
 
 def test_flywheel_hints_and_chip():
@@ -219,7 +240,7 @@ def test_form_dataset_row_cycles_ring():
                  datasets=[new, old])
     space = QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier, " ")
     assert dlg.row == 0 and dlg.dataset["dataset_id"] == "old"
-    assert "Dataset" in dlg.view.toPlainText()
+    assert "Dataset" in dlg.body.plain_text()
     dlg.keyPressEvent(space)
     assert dlg.dataset["dataset_id"] == "new"            # ring stepped
     assert dlg.overrides() == {"seed": 7}                # recipe stays
@@ -264,8 +285,9 @@ def test_form_excluded_labels_surfaces_classes_new_vs_recipe():
                  datasets=[grown, trained], adopt_classes=["speech", "inhale"])
     assert dlg._new_classes == []
     assert dlg.overrides()["exclude_labels"] == ["empty", "click"]
-    assert "new vs recipe" not in dlg.view.toPlainText()
-    assert 'href="close:"' in dlg.view.toHtml() or "✕" in dlg.view.toPlainText()
+    assert "new vs recipe" not in dlg.body.plain_text()
+    # the close anchor rides the FIXED header now (d55292f9: chrome never scrolls)
+    assert 'href="close:"' in dlg.head.toHtml()
     # cycle onto the grown dataset: the two unseen classes are auto-excluded
     space = QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier, " ")
     dlg.keyPressEvent(space)
@@ -273,7 +295,7 @@ def test_form_excluded_labels_surfaces_classes_new_vs_recipe():
     assert dlg._new_classes == ["chuckle", "background-music"]   # count order
     assert dlg.overrides()["exclude_labels"] == ["empty", "click", "chuckle",
                                                  "background-music"]
-    text = dlg.view.toPlainText()
+    text = dlg.body.plain_text()
     assert "new vs recipe: chuckle×6, background-music×3" in text
     # back to the trained set: the auto-adds go, the recipe's list returns
     dlg.keyPressEvent(space)
