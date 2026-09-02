@@ -285,7 +285,13 @@ class CorrectionWindow(QMainWindow):
         self.hitl.setVisible(False)
         self.editor = QLineEdit()
         self.editor.setVisible(False)
-        self.editor.returnPressed.connect(self._on_editor_submitted)
+        # Return is CONSUMED in the editor (eventFilter), not taken via
+        # returnPressed: QLineEdit emits returnPressed and then ignore()s the
+        # key event so it bubbles to the window's key table — once the propose
+        # lane gained an `enter` binding (propose_jump, 1fe6b583) the bubbled
+        # Return jumped the cursor off the insert BEFORE the relabel submit
+        # ran, and the submit refused itself ("cursor moved off the insert").
+        self.editor.installEventFilter(self)
         self.strip = StatusStrip()
         self.strip.set_readout("loading spine…")
         self.hints_overlay = KeyHintsOverlay(
@@ -319,6 +325,12 @@ class CorrectionWindow(QMainWindow):
         return False   # tab is a LANE key, never a focus move (priority=True port)
 
     def eventFilter(self, obj, event) -> bool:
+        if (obj is self.editor and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
+            # Submit AND swallow: the key never reaches keyPressEvent, so no
+            # lane `enter` binding fires on the same keystroke.
+            self._on_editor_submitted()
+            return True
         if obj is self.cards.viewport() and event.type() == QEvent.Wheel:
             # One cursor move per 120-unit wheel NOTCH (drive-1 field find:
             # high-resolution wheels emit several sub-notch events per detent,
