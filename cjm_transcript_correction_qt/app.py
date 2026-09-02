@@ -33,6 +33,7 @@ from cjm_context_graph_layer.journal import sidecar_journal_path
 from cjm_substrate.core.workspace import resolve_workspace
 from cjm_substrate.utils.lifecycle import (artifact_id, ArtifactLifecycle, find_holders,
                                            LifecycleRefusal, partition_lifecycle)
+from cjm_substrate_qt_kit.hitl import HitlPanel
 from cjm_substrate_qt_kit.keyhints import hint_line, keycaps, KeyHintsOverlay
 from cjm_substrate_qt_kit.pickerlist import PickerList
 from cjm_substrate_qt_kit.player import SpanPlayer
@@ -51,8 +52,7 @@ from cjm_transcript_correction_core.graph import (commit_boundary_shift_correcti
                                                   commit_speech_overlay_correction,
                                                   commit_speech_overlay_removal,
                                                   commit_stratum_correction,
-                                                  commit_stratum_retraction,
-                                                  commit_text_correction,
+                                                  commit_stratum_retraction, commit_text_correction,
                                                   commit_time_nudge_correction,
                                                   fa_words_for_transcript)
 from cjm_transcript_correction_core.models import (ANNOTATE_LANE_ACTIONS, ANNOTATE_ONLY_ACTIONS,
@@ -64,13 +64,6 @@ from cjm_transcript_correction_core.models import (ANNOTATE_LANE_ACTIONS, ANNOTA
                                                    RECOMMENDED_MARK_CLASSES,
                                                    RECOMMENDED_OVERLAY_LABELS,
                                                    RECOMMENDED_STRATUM_CLASSES, SPEEDS)
-from cjm_transcript_correction_core.strata import (FILTER_LANE, pending_filter_proposals,
-                                                   select_span_segments)
-from cjm_substrate_qt_kit.hitl import HitlPanel
-from cjm_transcript_correction_qt.filtering import FilterLane, load_filter_lane
-from cjm_transcript_correction_qt.event_payload import (event_items, event_payload_lines,
-                                                        event_provenance, event_rows,
-                                                        event_verdicts)
 from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_bound,
                                                   parse_entity_input, parse_mark_input,
                                                   plan_boundary_shift, plan_chunk_insert,
@@ -79,6 +72,12 @@ from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_b
                                                   snap_word_span)
 from cjm_transcript_correction_core.state import (load_tui_state, save_tui_state,
                                                   selector_for_spine, spine_label)
+from cjm_transcript_correction_core.strata import (FILTER_LANE, pending_filter_proposals,
+                                                   select_span_segments)
+from cjm_transcript_correction_qt.event_payload import (event_items, event_payload_lines,
+                                                        event_provenance, event_rows,
+                                                        event_verdicts)
+from cjm_transcript_correction_qt.filtering import FilterLane, load_filter_lane
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout, QWidget
