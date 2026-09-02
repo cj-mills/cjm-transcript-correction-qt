@@ -50,16 +50,27 @@ from cjm_transcript_correction_core.graph import (commit_boundary_shift_correcti
                                                   commit_speaker_entity,
                                                   commit_speech_overlay_correction,
                                                   commit_speech_overlay_removal,
+                                                  commit_stratum_correction,
+                                                  commit_stratum_retraction,
                                                   commit_text_correction,
                                                   commit_time_nudge_correction,
                                                   fa_words_for_transcript)
 from cjm_transcript_correction_core.models import (ANNOTATE_LANE_ACTIONS, ANNOTATE_ONLY_ACTIONS,
                                                    ASSIGN_LANE_ACTIONS, ASSIGN_ONLY_ACTIONS,
+                                                   FILTER_LANE_ACTIONS, FILTER_ONLY_ACTIONS,
                                                    NUDGE_STEPS_MS, NUDGE_TAIL_S,
                                                    PROPOSE_LANE_ACTIONS, PROPOSE_ONLY_ACTIONS,
                                                    RECOMMENDED_INSERT_LABELS,
                                                    RECOMMENDED_MARK_CLASSES,
-                                                   RECOMMENDED_OVERLAY_LABELS, SPEEDS)
+                                                   RECOMMENDED_OVERLAY_LABELS,
+                                                   RECOMMENDED_STRATUM_CLASSES, SPEEDS)
+from cjm_transcript_correction_core.strata import (FILTER_LANE, pending_filter_proposals,
+                                                   select_span_segments)
+from cjm_substrate_qt_kit.hitl import HitlPanel
+from cjm_transcript_correction_qt.filtering import FilterLane, load_filter_lane
+from cjm_transcript_correction_qt.event_payload import (event_items, event_payload_lines,
+                                                        event_provenance, event_rows,
+                                                        event_verdicts)
 from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_bound,
                                                   parse_entity_input, parse_mark_input,
                                                   plan_boundary_shift, plan_chunk_insert,
@@ -104,6 +115,7 @@ class CorrectionWindow(QMainWindow):
     export_done = Signal(object)     # respine seat Futures -> Qt thread (9af9793a)
     transfer_planned = Signal(object)
     transfer_done = Signal(object)
+    filter_loaded = Signal(object)   # the filter lane's sets/strata/gate read (55bcc3c5)
 
     def __init__(self, graph_db_path: Optional[str] = None,
                  *, source: Optional[str] = None,
@@ -180,6 +192,8 @@ class CorrectionWindow(QMainWindow):
         self._fa_words_cache: Dict[str, Optional[List[Dict[str, Any]]]] = {}
         self._input_mode = "edit"
         self._pending_proposal = None
+        self._filter: Optional[FilterLane] = None   # the filter lane's state (None = no sets)
+        self._event_cursor = 0                       # the propose lane's worklist cursor
         self._tick_info = None
         self._tick_claim = -1        # the paint generation the ticker owns
         self._status_gen = 0         # bumped by every status paint (the explicit receipt)
@@ -230,6 +244,7 @@ class CorrectionWindow(QMainWindow):
         self.export_done.connect(self._on_export_done)
         self.transfer_planned.connect(self._on_transfer_planned)
         self.transfer_done.connect(self._on_transfer_done)
+        self.filter_loaded.connect(self._on_filter_loaded)
         self.sess = CorrectionShellSession(manifests_dir,
                                            graph_capability=self._graph_cap)
         self.sess.start()
@@ -263,6 +278,12 @@ class CorrectionWindow(QMainWindow):
         self.picker = PickerList(on_cursor=self._on_picker_cursor,
                                  on_activate=self._on_picker_activate)
         self.picker.setVisible(False)
+        # The kit HITL confirm panel (55bcc3c5): worklist + verdict strip +
+        # provenance under the cards on the FILTER lane; the cards stay the
+        # spine walk, the panel's payload card is this app's filtering span.
+        self.hitl = HitlPanel(on_cursor=self._on_hitl_cursor,
+                              on_activate=self._on_hitl_activate)
+        self.hitl.setVisible(False)
         self.editor = QLineEdit()
         self.editor.setVisible(False)
         self.editor.returnPressed.connect(self._on_editor_submitted)
@@ -274,7 +295,8 @@ class CorrectionWindow(QMainWindow):
             self, on_launch=self._launch_finetune)
         self.transfer_dialog = TransferDialog(
             self, on_plan=self._plan_transfer, on_commit=self._commit_transfer)
-        lay.addWidget(self.cards, 1)
+        lay.addWidget(self.cards, 3)
+        lay.addWidget(self.hitl, 2)
         lay.addWidget(self.picker, 1)
         lay.addWidget(self.editor)
         lay.addWidget(self.strip)
@@ -425,14 +447,18 @@ class CorrectionWindow(QMainWindow):
             self._render_picker()
             return
         self._show_picker(False)
-        width, height = self._cells()
         view = self.view
         if view is None:
             return
         if not view.size:
+            self._render_hitl()
             self._paint_frame()
             self._paint_status(f"{view.source_title}  ·  empty spine")
             return
+        if self._filter_ready():
+            self._filter.refresh_index(view)   # once per frame, not per card
+        self._render_hitl()
+        width, height = self._cells()
         self.cards.setHtml(panes.lines_to_html(
             panes.render_rows(self, width, height)))
         self._paint_frame()
@@ -444,6 +470,8 @@ class CorrectionWindow(QMainWindow):
             self.picker.setVisible(on)
         if self.cards.isVisible() != (not on):
             self.cards.setVisible(not on)
+        if on and self.hitl.isVisible():
+            self.hitl.setVisible(False)
 
     def _render_picker(self) -> None:
         """Rebuild the active list stage's rows (kit PickerList, 8d29f0f0):
@@ -638,6 +666,13 @@ class CorrectionWindow(QMainWindow):
         self._render()
         if self.autoplay:
             self._play_cursor()
+        # The filter lane's sets ride the workspace (proposals/ beside the
+        # inhale sets); the read is loop-side and lands through filter_loaded.
+        self._filter = None
+        ws = resolve_workspace(explicit=None)
+        if ws is not None:
+            f = self.sess.submit(load_filter_lane(self.view, str(ws.root)))
+            f.add_done_callback(self.filter_loaded.emit)
 
     # ---- key dispatch (the check_action gate as a table walk) ------------
 
@@ -729,6 +764,23 @@ class CorrectionWindow(QMainWindow):
         add("P", "prev_prune",
             lambda: self._jump_glyph(-1, self.view.pruned_ids, "✂ pruned"))
         add("W", "gate_editor", self.action_gate_editor)
+        # The FILTER lane's confirm gestures (55bcc3c5): the headless
+        # filter-confirm verbs, one key each; , . E = the span-edit gesture.
+        add("a", "filter_accept", self.action_filter_accept)
+        add("E", "filter_accept_span", self.action_filter_accept_span)
+        add(",", "filter_span_start", self.action_filter_span_start)
+        add(".", "filter_span_end", self.action_filter_span_end)
+        add("L", "filter_relabel", self.action_filter_relabel)
+        add("m", "filter_mark", self.action_filter_mark)
+        add("x", "filter_retract", self.action_filter_retract)
+        add("W", "filter_watermark", self.action_filter_watermark)
+        add("n", "filter_next", lambda: self._jump_filter(1))
+        add("N", "filter_prev", lambda: self._jump_filter(-1))
+        add("enter", "filter_jump", self.action_filter_jump)
+        add("enter", "propose_jump", self.action_propose_jump)
+        add("R", "filter_audition", self.action_filter_audition)
+        add("t", "filter_tier2", self.action_filter_tier2)
+        add("S", "filter_set", self.action_filter_set)
         add("F", "flywheel_page", self.action_flywheel_page)
         add("X", "extract_dataset", self.action_extract_dataset)
         add("T", "train_dataset", self.action_train_dataset)
@@ -771,8 +823,10 @@ class CorrectionWindow(QMainWindow):
             return action in PROPOSE_LANE_ACTIONS
         if self.lane == "annotate":
             return action in ANNOTATE_LANE_ACTIONS
+        if self.lane == "filter":
+            return action in FILTER_LANE_ACTIONS
         return action not in (ASSIGN_ONLY_ACTIONS | PROPOSE_ONLY_ACTIONS
-                              | ANNOTATE_ONLY_ACTIONS)
+                              | ANNOTATE_ONLY_ACTIONS | FILTER_ONLY_ACTIONS)
 
     def keyPressEvent(self, event) -> None:
         if event.text() == "?":
@@ -1203,6 +1257,12 @@ class CorrectionWindow(QMainWindow):
             self._submit_gesture(self._do_submit_relabel(value))
         elif mode == "gate":
             self._submit_gesture(self._do_submit_gate(value))
+        elif mode == "filter_relabel":
+            self._submit_gesture(self._do_submit_filter_relabel(value))
+        elif mode == "filter_mark":
+            self._submit_gesture(self._do_submit_filter_mark(value))
+        elif mode == "filter_watermark":
+            self._submit_gesture(self._do_submit_filter_watermark(value))
         elif mode == "annotate":
             self._submit_gesture(self._do_submit_annotate(value))
         else:
@@ -1246,6 +1306,7 @@ class CorrectionWindow(QMainWindow):
     def _cycle_lane(self, delta: int) -> None:
         order = (["walk", "assign"]
                  + (["propose"] if self.view.proposals_meta else [])
+                 + (["filter"] if self._filter is not None and self._filter.sets else [])
                  + ["annotate"])
         self.lane = order[(order.index(self.lane) + delta) % len(order)] \
             if self.lane in order else "walk"
@@ -1977,6 +2038,436 @@ class CorrectionWindow(QMainWindow):
         return {"status": f"⛭ gate asserted: {new_status} · "
                           f"annotated_through {wm_txt}"}
 
+    # ---- filter lane (55bcc3c5: the filtering payload of the HITL confirm) --
+
+    def _filter_ready(self) -> bool:
+        return (self.lane == "filter" and self._filter is not None
+                and bool(self._filter.sets))
+
+    def _hitl_lane(self) -> Optional[str]:
+        """Which payload the kit panel hosts right now: the filtering span on
+        the filter lane, the event span on the propose lane, else nothing."""
+        if self.stage != "correct" or self.view is None:
+            return None
+        if self._filter_ready():
+            return "filter"
+        if self.lane == "propose" and self.view.proposals_meta:
+            return "propose"
+        return None
+
+    def _on_filter_loaded(self, fut) -> None:
+        try:
+            lane = fut.result()
+        except Exception as e:
+            self._paint_status(f"⚠ filtering sets: {e}")
+            return
+        if self.view is None:
+            return
+        self._filter = lane
+        if lane is None:
+            return
+        if self.lane == "filter":
+            self._render()
+        else:
+            self._paint_status(f"filtering: {len(lane.pending())} pending in set "
+                               f"…{lane.set_id[-8:]} · tab to the filter lane")
+
+    def _payload_width(self) -> int:
+        return max(40, self._cells()[0] - 4)
+
+    def _render_hitl(self) -> None:
+        """Paint the kit panel from the lane state: items (cursor held by
+        the lane), the payload card for the cursor row, the derived
+        verdicts, the provenance pairs. Hidden off the filter lane."""
+        which = self._hitl_lane()
+        on = which is not None
+        if self.hitl.isVisible() != on:
+            self.hitl.setVisible(on)
+        if not on:
+            return
+        if which == "propose":
+            self._render_event_hitl()
+            return
+        f, view = self._filter, self.view
+        p = f.current()
+        model = f.manifest.get("model") or {}
+        pending = len(f.pending())
+        hidden = (0 if f.show_tier2 else
+                  sum(1 for p in pending_filter_proposals(f.proposals, f.strata, show_tier2=True,
+                                                          materialized=f.mark_ids)
+                      if int(p.get("tier", 1)) == 2))
+        header = (f"set …{f.set_id[-8:]} · {model.get('name') or '?'} · {pending} pending"
+                  + (f" · {hidden} tier-2 hidden (t)" if hidden else ""))
+        self.hitl.worklist.set_items(f.items(view), cursor=f.cursor, header=header)
+        self.hitl.worklist.set_payload(f.payload_lines(view, p, width=self._payload_width()))
+        t1, t2, wm, extra = f.verdicts()
+        self.hitl.verdicts.set_verdicts(t1, t2, watermark=wm, extra=extra)
+        self.hitl.provenance.set_entries(f.provenance(self.actor, self.session_id))
+
+    def _render_event_hitl(self) -> None:
+        """The propose lane on the same chrome: pending event proposals as
+        the worklist, the seam card as the payload, the view's set meta as
+        provenance. The lane's gestures stay at the walk cursor."""
+        view = self.view
+        rows = event_rows(view)
+        self._event_cursor = max(0, min(len(rows) - 1, self._event_cursor)) if rows else 0
+        meta = view.proposals_meta or {}
+        header = (f"set …{str(meta.get('proposal_set_id') or '')[-8:]} · "
+                  f"run …{str(meta.get('training_run_id') or '')[-8:]} · {len(rows)} pending")
+        self.hitl.worklist.set_items(event_items(view), cursor=self._event_cursor, header=header)
+        self.hitl.worklist.set_payload(self._event_payload())
+        t1, t2, wm, extra = event_verdicts(view)
+        self.hitl.verdicts.set_verdicts(t1, t2, watermark=wm, extra=extra)
+        self.hitl.provenance.set_entries(event_provenance(view, self.actor, self.session_id))
+
+    def _event_payload(self) -> List[Any]:
+        rows = event_rows(self.view)
+        if not rows or not (0 <= self._event_cursor < len(rows)):
+            return []
+        pos, p = rows[self._event_cursor]
+        return event_payload_lines(self.view, pos, p, width=self._payload_width())
+
+    def _on_hitl_cursor(self, i: int) -> None:
+        """A worklist cursor move repaints the payload card alone."""
+        which = self._hitl_lane()
+        if which == "propose":
+            self._event_cursor = i
+            self.hitl.worklist.set_payload(self._event_payload())
+            return
+        if which != "filter":
+            return
+        self._filter.cursor = i
+        self.hitl.worklist.set_payload(
+            self._filter.payload_lines(self.view, self._filter.current(),
+                                       width=self._payload_width()))
+
+    def _on_hitl_activate(self, key) -> None:
+        """Double-click / enter on a worklist row: jump the walk to it."""
+        which = self._hitl_lane()
+        if which == "propose":
+            for i, (pos, p) in enumerate(event_rows(self.view)):
+                if str(p.get("proposal_id") or f"{pos}:{p.get('start_time')}-{p.get('end_time')}") == key:
+                    self._event_cursor = i
+                    self._event_jump_to(pos, p)
+                    return
+            return
+        if which != "filter":
+            return
+        for i, p in enumerate(self._filter.pending()):
+            if p.get("proposal_id") == key:
+                self._filter.cursor = i
+                self._filter_jump_to(p)
+                return
+
+    def _event_jump_to(self, pos: int, p: Dict[str, Any]) -> None:
+        self.cursor = pos
+        self._word_cursor, self._word_anchor = 0, None
+        self._render()
+        self._autoplay_timer.stop()
+        if self.player is not None:
+            self.player.stop()
+        self._play_span_source(float(p["start_time"]), float(p["end_time"]),
+                               note=f" · ?{p.get('label')} score {float(p.get('score') or 0):.2f}"
+                                    " · a accepts · R replays")
+
+    def action_propose_jump(self) -> None:
+        """enter (propose lane): walk to the worklist's cursor row."""
+        rows = event_rows(self.view)
+        if not rows:
+            self._paint_status("no pending proposals" + ("" if self.view.show_tier2 else " · t shows tier 2"))
+            return
+        self._event_cursor = max(0, min(len(rows) - 1, self._event_cursor))
+        pos, p = rows[self._event_cursor]
+        self._event_jump_to(pos, p)
+
+    def _filter_jump_to(self, p: Dict[str, Any]) -> None:
+        pos = self._filter.covering_positions(self.view, p)
+        if not pos:
+            self._render()
+            self._paint_status("no text segment of the current spine overlaps this "
+                               "proposal — , . mark the run at the cursor, E accepts over it")
+            return
+        self.cursor = pos[0]
+        self._word_cursor, self._word_anchor = 0, None
+        self._render()
+        self._autoplay_timer.stop()
+        if self.player is not None:
+            self.player.stop()
+        tier = "??" if int(p.get("tier", 1)) == 2 else "?"
+        self._play_span_source(float(p["start_time"]), float(p["end_time"]),
+                               note=f" · {tier}{p.get('category')} · a accepts · E span-accept")
+
+    def _filter_current_or_status(self) -> Optional[Dict[str, Any]]:
+        if not self._filter_ready():
+            self._paint_status("no filtering proposal set for this spine")
+            return None
+        p = self._filter.current()
+        if p is None:
+            self._paint_status("no pending proposals"
+                               + ("" if self._filter.show_tier2 else " · t shows the audition tier"))
+        return p
+
+    def action_filter_jump(self) -> None:
+        p = self._filter_current_or_status()
+        if p is not None:
+            self._filter_jump_to(p)
+
+    def _jump_filter(self, direction: int) -> None:
+        if not self._filter_ready():
+            return
+        f, view = self._filter, self.view
+        rows = f.pending()
+        if not rows:
+            self._filter_current_or_status()
+            return
+        firsts = [(f.covering_positions(view, p)[:1] or [None])[0] for p in rows]
+        cands = [i for i, fp in enumerate(firsts)
+                 if fp is not None and (fp > self.cursor if direction > 0 else fp < self.cursor)]
+        if not cands:
+            self._paint_status("no more pending proposals this way")
+            return
+        f.cursor = cands[0] if direction > 0 else cands[-1]
+        self._filter_jump_to(rows[f.cursor])
+
+    def action_filter_audition(self) -> None:
+        p = self._filter_current_or_status()
+        if p is None:
+            return
+        if self.player is not None:
+            self.player.stop()
+        tier = "??" if int(p.get("tier", 1)) == 2 else "?"
+        self._play_span_source(float(p["start_time"]), float(p["end_time"]),
+                               note=f" · {tier}{p.get('category')} · a accepts")
+
+    def action_filter_accept(self) -> None:
+        """a: accept IS the stratum op. The run is resolved BY TIME over the
+        current spine (the frozen ids drift once the walk lane moves text);
+        an empty resolution refuses and asks for the span-edit gesture."""
+        p = self._filter_current_or_status()
+        if p is None:
+            return
+        self._submit_gesture(self._do_filter_accept(p))
+
+    async def _do_filter_accept(self, p: Dict[str, Any], category: Optional[str] = None,
+                                span: Optional[Tuple[float, float]] = None):
+        f, view = self._filter, self.view
+        ps, pe = float(p.get("start_time") or 0.0), float(p.get("end_time") or 0.0)
+        if span is not None:
+            run = select_span_segments(view.segments, span[0], span[1])
+            how = "span edited"
+        else:
+            run = [view.segments[i] for i in f.covering_positions(view, p)]
+            how = "run re-resolved by time" if f.drifted(view, p) else ""
+        if not run:
+            return {"status": "accept refused: no text segment under the span — "
+                              ", . mark the run at the cursor, then E"}
+        cat = category or str(p.get("category"))
+        note = str(p.get("rationale") or "")
+        if category:
+            note = f"relabeled from {p.get('category')} by {self.actor}: {note}".strip()
+        if span is not None:
+            note = f"span edited by {self.actor} from {ps:.2f}-{pe:.2f}s: {note}".strip()
+        ids = [s.id for s in run]
+        start, end = float(run[0].start_time), float(run[-1].end_time)
+        cid = await commit_stratum_correction(
+            view.queue, view.graph_id, view.source_id, ids, cat, self.session_id,
+            skeleton_hash=view.skeleton_hash, start_time=start, end_time=end,
+            proposal_id=p.get("proposal_id"), proposal_set_id=f.set_id,
+            actor=self.actor, note=note, journal_path=self._journal_path)
+        f.echo_stratum({"id": cid, "correction_type": "stratum", "status": "applied",
+                        "actor": self.actor, "created_at": time.time(),
+                        "payload": {"operation": "classify", "source_id": view.source_id,
+                                    "category": cat, "segment_ids": ids,
+                                    "start_time": start, "end_time": end,
+                                    "proposal_id": p.get("proposal_id"),
+                                    "proposal_set_id": f.set_id}})
+        verb = "relabeled" if category else "accepted"
+        return {"status": f"▣ {verb} {cat} {start:.1f}–{end:.1f}s x{len(run)} seg(s)"
+                          + (f" · {how}" if how else "") + f" · stratum {cid[:8]}",
+                "status_first": True,
+                "play": ("span", start, end, f" · ▣ {cat}")}
+
+    def action_filter_span_start(self) -> None:
+        if self._filter_current_or_status() is None:
+            return
+        seg = self.view.segments[self.cursor]
+        if seg.start_time is None:
+            self._paint_status("span start: the cursor segment has no time")
+            return
+        _, b = self._filter.span or (None, None)
+        self._filter.span = (float(seg.start_time), b)
+        self._render()
+        self._paint_status(f"span start #{seg.index} {float(seg.start_time):.1f}s · "
+                           ". marks the end at the cursor · E accepts over the span")
+
+    def action_filter_span_end(self) -> None:
+        if self._filter_current_or_status() is None:
+            return
+        seg = self.view.segments[self.cursor]
+        if seg.end_time is None:
+            self._paint_status("span end: the cursor segment has no time")
+            return
+        a, _ = self._filter.span or (None, None)
+        self._filter.span = (a, float(seg.end_time))
+        self._render()
+        self._paint_status(f"span end #{seg.index} {float(seg.end_time):.1f}s · "
+                           + (", marks the start · " if a is None else "")
+                           + "E accepts over the span")
+
+    def action_filter_accept_span(self) -> None:
+        """E: the span-edit gesture — accept over the CURRENT spine's text
+        segments contained in the marked span (the headless --accept-span)."""
+        p = self._filter_current_or_status()
+        if p is None:
+            return
+        span = self._filter.span
+        if span is None or span[0] is None or span[1] is None:
+            self._paint_status("mark the run first: , at its first segment · . at its last · then E")
+            return
+        if span[1] <= span[0]:
+            self._paint_status("span edit: the end must come after the start")
+            return
+        self._submit_gesture(self._do_filter_accept(p, span=(span[0], span[1])))
+
+    def action_filter_relabel(self) -> None:
+        p = self._filter_current_or_status()
+        if p is None:
+            return
+        self._open_editor("filter_relabel", str(p.get("category") or ""),
+                          status="relabel: class token · "
+                                 + " · ".join(RECOMMENDED_STRATUM_CLASSES)
+                                 + " · enter accepts under it · esc cancels")
+
+    async def _do_submit_filter_relabel(self, raw: str):
+        cls = raw.strip()
+        if not cls[:1].isalnum():
+            return {"status": "relabel: a class token is needed (letter/digit-led)"}
+        p = self._filter.current() if self._filter_ready() else None
+        if p is None:
+            return {"status": "relabel: no pending proposal"}
+        return await self._do_filter_accept(p, category=cls)
+
+    def action_filter_mark(self) -> None:
+        p = self._filter_current_or_status()
+        if p is None:
+            return
+        self._open_editor("filter_mark", str(p.get("category") or ""),
+                          status="accept AS A MARK (correction-pass attention, never a "
+                                 "stratum): class · " + " · ".join(RECOMMENDED_MARK_CLASSES)
+                                 + " · enter · esc cancels")
+
+    async def _do_submit_filter_mark(self, raw: str):
+        cls = raw.strip()
+        if not cls[:1].isalnum():
+            return {"status": "mark: a class token is needed"}
+        f, view = self._filter, self.view
+        p = f.current() if self._filter_ready() else None
+        if p is None:
+            return {"status": "mark: no pending proposal"}
+        pos = f.covering_positions(view, p)
+        ids = ([view.segments[i].id for i in pos] if f.drifted(view, p)
+               else list(p.get("segment_ids") or []))
+        if not ids:
+            return {"status": "mark refused: no text segment under the span"}
+        model = f.manifest.get("model") or {}
+        note = f"from proposal ({model.get('name')}): {p.get('rationale') or ''}".strip()
+        first = None
+        for seg_id in ids:
+            mid = await commit_mark_correction(
+                view.queue, view.graph_id, view.source_id,
+                {"kind": "segment", "segment_id": seg_id}, cls, self.session_id,
+                actor=self.actor, note=note, journal_path=self._journal_path,
+                proposal_id=p.get("proposal_id"), proposal_set_id=f.set_id)
+            first = first or mid
+        f.echo_mark(p.get("proposal_id"))
+        ps, pe = float(p.get("start_time") or 0.0), float(p.get("end_time") or 0.0)
+        return {"status": f"⚑ marked {cls} x{len(ids)} seg(s) from proposal "
+                          f"…{str(p.get('proposal_id') or '')[-8:]} · mark {str(first)[:8]}",
+                "status_first": True, "play": ("span", ps, pe, f" · ⚑ {cls}")}
+
+    def action_filter_retract(self) -> None:
+        if not self._filter_ready():
+            self._paint_status("no filtering proposal set for this spine")
+            return
+        seg = self.view.segments[self.cursor]
+        cands = self._filter.strata_at(seg.id)
+        if not cands:
+            self._paint_status("no live stratum at the cursor segment")
+            return
+        self._submit_gesture(self._do_filter_retract(cands[0]))
+
+    async def _do_filter_retract(self, c: Dict[str, Any]):
+        f, view = self._filter, self.view
+        rid = await commit_stratum_retraction(
+            view.queue, view.graph_id, view.source_id, c["id"], self.session_id,
+            actor=self.actor, note="retracted in the filter lane",
+            journal_path=self._journal_path)
+        f.echo_retract(c["id"])
+        pl = c.get("payload") or {}
+        return {"status": f"⊘ retracted {pl.get('category')} "
+                          f"{float(pl.get('start_time') or 0):.1f}–{float(pl.get('end_time') or 0):.1f}s"
+                          f" (via {str(rid)[:8]})"
+                          + (" · proposal back in the worklist" if pl.get("proposal_id") else "")}
+
+    def action_filter_watermark(self) -> None:
+        if not self._filter_ready():
+            self._paint_status("no filtering proposal set for this spine")
+            return
+        wm = self._filter.watermark
+        self._open_editor("filter_watermark", "end",
+                          status="filter-lane watermark: end · none · <sec> (absence below it "
+                                 "derives rejects) · enter · esc"
+                                 + (f" · now {wm:.1f}s" if wm is not None else " · now none"))
+
+    async def _do_submit_filter_watermark(self, raw: str):
+        f, view = self._filter, self.view
+        arg = raw.strip().lower()
+        if arg == "end":
+            ends = [float(s.end_time) for s in view.segments if s.end_time is not None]
+            if not ends:
+                return {"status": "watermark end: the spine has no timed segments"}
+            wm: Optional[float] = max(ends)
+        elif arg == "none":
+            wm = None
+        else:
+            try:
+                wm = float(arg)
+            except ValueError:
+                return {"status": "watermark: end · none · <sec> (refused)"}
+        status = str((f.gate or {}).get("extraction_status") or "in_progress")
+        gid = await commit_extraction_gate(
+            view.queue, view.graph_id, view.source_id, view.skeleton_hash, status, wm,
+            session_id=self.session_id, actor=self.actor, journal_path=self._journal_path,
+            lane=FILTER_LANE)
+        f.echo_gate({"id": gid, "source_id": view.source_id, "skeleton_hash": view.skeleton_hash,
+                     "extraction_status": status, "annotated_through": wm, "lane": FILTER_LANE,
+                     "actor": self.actor, "created_at": time.time()})
+        return {"status": f"⛭ filter-lane watermark: annotated_through "
+                          f"{('%.1fs' % wm) if wm is not None else 'none'} ({str(gid)[:8]})"}
+
+    def action_filter_tier2(self) -> None:
+        if not self._filter_ready():
+            self._paint_status("no filtering proposal set for this spine")
+            return
+        f = self._filter
+        f.show_tier2 = not f.show_tier2
+        f.cursor = 0
+        self._render()
+        self._paint_status("audition tier shown (dim rows never batch-accept) · t hides"
+                           if f.show_tier2 else "audition tier hidden · t shows")
+
+    def action_filter_set(self) -> None:
+        if not self._filter_ready():
+            self._paint_status("no filtering proposal set for this spine")
+            return
+        f = self._filter
+        if len(f.sets) < 2:
+            self._paint_status("one filtering set for this spine")
+            return
+        f.cycle_set(1)
+        self._render()
+        self._paint_status(f"set {f.set_index + 1}/{len(f.sets)}: …{f.set_id[-8:]}")
+
     # ---- annotate lane ---------------------------------------------------
 
     def _resolve_fa_cache(self) -> Optional[Path]:
@@ -2447,6 +2938,11 @@ class CorrectionWindow(QMainWindow):
         self.session_id = None
         self._marks = {}
         self._pending_proposal = None
+        self._filter = None
+        self._event_cursor = 0
+        hitl = getattr(self, "hitl", None)   # the unbound-method tests host no widgets
+        if hitl is not None:
+            hitl.setVisible(False)
         self._accept_cluster = None
         self._active_entity = None
         self._word_anchor = None
@@ -2812,6 +3308,9 @@ class CorrectionWindow(QMainWindow):
             self._accept_cluster = None
             self._pending_proposal = None
             self._close_editor()
+            self._render()
+        elif self._filter_ready() and self._filter.span is not None:
+            self._filter.span = None   # esc clears the span-edit anchors
             self._render()
         elif self._word_anchor is not None:
             self._word_anchor = None

@@ -246,6 +246,30 @@ def card_lines(s: Any, pos: int, width: int) -> Tuple[List[Line], int]:
             chip = [(f"{q}{p.get('label')} {float(p.get('score') or 0):.2f}{extra} ▏",
                      "dim magenta" if q == "??" else "dim cyan")]
             body = chip + body
+    elif s.lane == "filter" and getattr(s, "_filter", None) is not None:
+        # The filter lane's chips: live strata over the segment (▣class), the
+        # pending proposal covering it (?class c), the span-edit anchors.
+        f = s._filter
+        chip = []
+        cats = f.strata_map.get(seg.id) or []
+        if cats:
+            chip.append((f"▣{','.join(cats)[:22]} ▏", "green"))
+        props = f.pending_index.get(seg.id) or []
+        if props:
+            p = props[0]
+            q = "??" if int(p.get("tier", 1)) == 2 else "?"
+            conf = p.get("confidence")
+            extra = f"×{len(props)}" if len(props) > 1 else ""
+            chip.append((f"{q}{p.get('category')}"
+                         + (f" {float(conf):.2f}" if isinstance(conf, (int, float)) else "")
+                         + f"{extra} ▏", "dim magenta" if q == "??" else "dim cyan"))
+        if f.span is not None:
+            a, b = f.span
+            if a is not None and seg.start_time is not None and abs(float(seg.start_time) - a) < 0.005:
+                g1.append((" ⟦", "yellow"))
+            if b is not None and seg.end_time is not None and abs(float(seg.end_time) - b) < 0.005:
+                g1.append((" ⟧", "yellow"))
+        body = chip + body
     elif s.lane == "annotate" and pos == s.cursor and seg.text:
         body = annotate_body(s, seg)
     if abs(pos - s.cursor) > 1 and seg.text:
@@ -312,7 +336,7 @@ def status_line(s: Any) -> str:
     position + lane-scoped counters + the ACTIVE LANE's keybar only."""
     view = s.view
     badges = {"assign": "[ASSIGN]", "propose": "[PROPOSE]",
-              "annotate": "[ANNOTATE]"}.get(s.lane, "[WALK]")
+              "filter": "[FILTER]", "annotate": "[ANNOTATE]"}.get(s.lane, "[WALK]")
     if s.purpose:
         badges += (" [TEST PASS]" if s.purpose == "feature-test"
                    else f" [{s.purpose.upper()}]")
@@ -664,7 +688,7 @@ def status_chips(s: Any) -> List[Tuple[str, str]]:
     hint_entries + the ?-overlay, and action results ride the readout slot."""
     view = s.view
     badges = {"assign": "[ASSIGN]", "propose": "[PROPOSE]",
-              "annotate": "[ANNOTATE]"}.get(s.lane, "[WALK]")
+              "filter": "[FILTER]", "annotate": "[ANNOTATE]"}.get(s.lane, "[WALK]")
     if s.purpose:
         badges += (" [TEST PASS]" if s.purpose == "feature-test"
                    else f" [{s.purpose.upper()}]")
@@ -694,6 +718,21 @@ def status_chips(s: Any) -> List[Tuple[str, str]]:
                   ("set", f"set {str(meta.get('proposal_set_id') or '')[-8:]}"),
                   ("model",
                    f"model {str(meta.get('training_run_id') or '')[-8:]}")]
+    elif s.lane == "filter":
+        f = getattr(s, "_filter", None)
+        if f is None or not f.sets:
+            chips.append(("proposals", "no filtering set for this spine"))
+        else:
+            pending = f.pending()
+            t2 = sum(1 for p in f.proposals if int(p.get("tier", 1)) == 2)
+            wm = f.watermark
+            chips += [("proposals", f"proposals {len(pending)} pending"
+                                    + (f" · tier2 {t2} {'shown' if f.show_tier2 else 'hidden'}"
+                                       if t2 else "")),
+                      ("set", f"set …{f.set_id[-8:]}"
+                              + (f" ({f.set_index + 1}/{len(f.sets)})" if len(f.sets) > 1 else "")),
+                      ("strata", f"▣ {len(f.strata)}"),
+                      ("watermark", f"watermark {wm:.1f}s" if wm is not None else "watermark none")]
     elif s.lane == "annotate":
         seg = view.segments[s.cursor]
         toks = segment_word_tokens(seg.text)
@@ -762,6 +801,7 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
     if s.lane == "propose":
         return [e("propose_accept", "a", "accept proposal", "Proposals"),
                 e("propose_next", "n/N", "jump proposal", "Proposals"),
+                e("propose_jump", "enter", "walk to worklist row", "Proposals"),
                 e("propose_audition", "R", "audition proposal", "Proposals"),
                 e("toggle_tier2", "t", "tier2 show/hide", "Proposals"),
                 e("nudge_end_earlier", ",./<>", "nudge", "Edit"),
@@ -770,6 +810,27 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
                 e("remove_insert", "x", "remove", "Edit"),
                 e("edit", "e", "edit text", "Edit"),
                 e("replay", "r", "replay chunk", "Audio"),
+                e("next", "j/k", "walk", "Walk"),
+                e("seam_next", "g/G", "seam", "Walk"),
+                e("cycle_lane", "tab", "lane", "App"),
+                e("back", "B", "spine picker", "App"),
+                e("flywheel_page", "F", "flywheel", "App"),
+                e("quit_app", "q", "quit", "App")]
+    if s.lane == "filter":
+        return [e("filter_accept", "a", "accept stratum", "Confirm"),
+                e("filter_span_start", ", .", "mark run start/end", "Confirm"),
+                e("filter_accept_span", "E", "accept over span", "Confirm"),
+                e("filter_relabel", "L", "relabel + accept", "Confirm"),
+                e("filter_mark", "m", "accept as mark", "Confirm"),
+                e("filter_retract", "x", "retract stratum", "Confirm"),
+                e("filter_watermark", "W", "lane watermark", "Confirm"),
+                e("filter_next", "n/N", "jump proposal", "Worklist"),
+                e("filter_jump", "enter", "walk to row", "Worklist"),
+                e("filter_audition", "R", "audition", "Worklist"),
+                e("filter_tier2", "t", "tier2 show/hide", "Worklist"),
+                e("filter_set", "S", "next set", "Worklist"),
+                e("replay", "r", "replay", "Audio"),
+                e("speed_up", "[/]", "speed", "Audio"),
                 e("next", "j/k", "walk", "Walk"),
                 e("seam_next", "g/G", "seam", "Walk"),
                 e("cycle_lane", "tab", "lane", "App"),
@@ -829,6 +890,8 @@ def default_pins(s: Any) -> List[str]:
                        "next", "cycle_lane"],
             "propose": ["propose_accept", "propose_next",
                         "propose_audition", "next", "cycle_lane"],
+            "filter": ["filter_accept", "filter_next", "filter_accept_span",
+                       "filter_mark", "cycle_lane"],
             "annotate": ["word_right", "annotate_quick", "annotate_pick",
                          "next", "cycle_lane"],
             }.get(s.lane, ["next", "replay", "nudge_end_earlier", "edit",

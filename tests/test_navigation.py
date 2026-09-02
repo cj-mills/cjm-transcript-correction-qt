@@ -25,7 +25,7 @@ def build_table():
 
 def test_key_table_nav_bindings():
     t = build_table()
-    assert [a for a, _ in t["W"]] == ["gate_editor"]      # gate left F
+    assert [a for a, _ in t["W"]] == ["gate_editor", "filter_watermark"]   # gate left F; the filter lane's watermark shares the key
     assert [a for a, _ in t["F"]] == ["flywheel_page"]    # F is nav-only now
     assert [a for a, _ in t["B"]] == ["back"]
     assert [a for a, _ in t["escape"]] == ["cancel", "back"]  # lanes cancel first
