@@ -205,24 +205,27 @@ class CorrectionShellSession(LoopThreadSession):
     def open_spine(self, source_id: str, title: str,
                    *, rendition: Optional[str], skeleton: Optional[str],
                    journal_path: Any, purpose: Optional[str],
-                   actor_sources: Optional[List[str]] = None) -> Future:
+                   actor_sources: Optional[List[str]] = None,
+                   actor: str = "human") -> Future:
         """Open one Source's CHOSEN spine on the already-open stack, mint the
         graph CorrectionSession every commit stamps, and load the speaker
         Entity registry (source-spanning, people-scale). Resolves to
         {"view", "session_id", "entities"}; the view stays loop-owned — the
-        shell reads it for paint, mutates it only through submitted verbs."""
+        shell reads it for paint, mutates it only through submitted verbs.
+        `actor` stamps the session-start journal row (finding ac878d68)."""
         return self.submit(self._open_spine(source_id, title, rendition,
                                             skeleton, journal_path, purpose,
-                                            actor_sources))
+                                            actor_sources, actor))
 
     async def _open_spine(self, source_id, title, rendition, skeleton,
-                          journal_path, purpose, actor_sources):
+                          journal_path, purpose, actor_sources, actor="human"):
         view = await self._view_opener(self.manager, self.queue,
                                        self.graph_capability, source_id, title,
                                        rendition=rendition, skeleton=skeleton)
         sess = await start_session(view.queue, view.graph_id,
                                    actor_sources or [view.source_id],
-                                   journal_path=journal_path, purpose=purpose)
+                                   journal_path=journal_path, purpose=purpose,
+                                   actor=actor)
         entities = await list_speaker_entities(view.queue, view.graph_id)
         self.view = view
         self.session_id = sess.id

@@ -587,7 +587,7 @@ class CorrectionWindow(QMainWindow):
                                  rendition=self._open_kwargs["rendition"],
                                  skeleton=skeleton,
                                  journal_path=self._journal_path,
-                                 purpose=self.purpose)
+                                 purpose=self.purpose, actor=self.actor)
         f.add_done_callback(self.spine_opened.emit)
 
     def _on_spine_opened(self, fut) -> None:

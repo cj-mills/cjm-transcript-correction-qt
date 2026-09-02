@@ -82,10 +82,11 @@ def test_open_spine_mints_session_and_registry(monkeypatch):
     import cjm_transcript_correction_qt.session as mod
 
     async def fake_start_session(queue, graph_id, sources, *, journal_path,
-                                 purpose):
+                                 purpose, actor="human"):
         assert sources == ["src-1"]
         assert journal_path == "/x/journal"
         assert purpose == "feature-test"
+        assert actor == "agent:probe"   # the shell's actor reaches the session row (ac878d68)
         return SimpleNamespace(id="sess-42")
 
     async def fake_entities(queue, graph_id):
@@ -99,7 +100,7 @@ def test_open_spine_mints_session_and_registry(monkeypatch):
         sess.open_stack(None).result(5)
         res = sess.open_spine("src-1", "Talk", rendition=None, skeleton=None,
                               journal_path="/x/journal",
-                              purpose="feature-test").result(5)
+                              purpose="feature-test", actor="agent:probe").result(5)
         assert res["session_id"] == "sess-42"
         assert res["entities"] == [{"id": "e1"}]
         assert sess.view is res["view"]
@@ -138,7 +139,7 @@ def test_close_with_open_spine_closes_view(monkeypatch):
     import cjm_transcript_correction_qt.session as mod
 
     async def fake_start_session(queue, graph_id, sources, *, journal_path,
-                                 purpose):
+                                 purpose, actor="human"):
         return SimpleNamespace(id="s")
 
     async def fake_entities(queue, graph_id):
