@@ -245,3 +245,16 @@ def test_focus_row_looks_ahead_when_the_cursor_has_nothing_pending():
         f.echo_stratum(_stratum("c" + p["proposal_id"], p["category"], p["segment_ids"],
                                 p["start_time"], p["end_time"], proposal_id=p["proposal_id"]))
     assert f.focus_row(view, 0) is None
+
+
+def test_run_span_sounds_the_current_run_not_the_frozen_proposal_times():
+    """R audition sighting (2026-09-02): a walk-lane nudge moved #129's
+    start earlier; r replayed the nudged span, R the frozen one."""
+    view, f = two_on_one_segment()
+    view.segments[1].start_time = 113.3          # nudged 0.5 s earlier after the pack
+    p = f.pending()[0]                            # p-rm over #1
+    assert f.run_span(view, p) == (113.3, 116.5)
+    q = next(x for x in f.pending() if x["proposal_id"] == "p-q")
+    assert f.run_span(view, q) == (113.3, 126.6)  # the run's first start, last end
+    orphan = _prop("p-none", "tangent", 900.0, 901.0, ["s9"])
+    assert f.run_span(view, orphan) == (900.0, 901.0)   # nothing covers: frozen times

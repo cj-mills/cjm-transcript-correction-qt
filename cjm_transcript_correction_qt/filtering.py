@@ -179,6 +179,19 @@ class FilterLane:
                 out.append(i)
         return out
 
+    def run_span(self, view: Any, p: Dict[str, Any]) -> Tuple[float, float]:
+        """The span a gesture SOUNDS for a proposal: the covering run's
+        current times on the effective spine (walk-lane nudges and shifts
+        included — what an accept would mint), falling back to the frozen
+        proposal times when nothing covers it. User sighting 2026-09-02:
+        R auditioned the frozen span while r replayed the nudged one."""
+        pos = self.covering_positions(view, p)
+        times = [(view.segments[i].start_time, view.segments[i].end_time) for i in pos]
+        times = [(float(s), float(e)) for s, e in times if s is not None and e is not None]
+        if not times:
+            return (float(p.get("start_time") or 0.0), float(p.get("end_time") or 0.0))
+        return (min(s for s, _ in times), max(e for _, e in times))
+
     def drifted(self, view: Any, p: Dict[str, Any]) -> bool:
         """The frozen segment ids no longer name the run the span covers."""
         want = [view.segments[i].id for i in self.covering_positions(view, p)]

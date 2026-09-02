@@ -2231,7 +2231,8 @@ class CorrectionWindow(QMainWindow):
         if self.player is not None:
             self.player.stop()
         tier = "??" if int(p.get("tier", 1)) == 2 else "?"
-        self._play_span_source(float(p["start_time"]), float(p["end_time"]),
+        start, end = self._filter.run_span(self.view, p)   # the CURRENT run's times
+        self._play_span_source(start, end,
                                note=f" · {tier}{p.get('category')} · a accepts · E span-accept")
 
     def _filter_current_or_status(self) -> Optional[Dict[str, Any]]:
@@ -2296,7 +2297,8 @@ class CorrectionWindow(QMainWindow):
         if self.player is not None:
             self.player.stop()
         tier = "??" if int(p.get("tier", 1)) == 2 else "?"
-        self._play_span_source(float(p["start_time"]), float(p["end_time"]),
+        start, end = f.run_span(self.view, p)   # nudged/shifted times, not the frozen span
+        self._play_span_source(start, end,
                                note=f" · {tier}{p.get('category')} · a accepts")
 
     def action_filter_accept(self) -> None:
