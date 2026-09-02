@@ -72,3 +72,22 @@ def test_verdicts_and_provenance_derive_from_view_meta():
     assert prov["set"] == "propset_x" and prov["model"] == "training run run_y"
     assert prov["classes"] == "inhale · click" and prov["window"] == "00:00.0–00:08.0"
     assert prov["session"] == "sess-abc · actor human"
+
+
+def test_event_rows_resolve_anchors_in_one_pass_and_skip_unknown_anchors():
+    """The per-anchor linear scan was O(segments x proposals) — ~0.5 s a
+    frame on Show 62 (2026-09-02). One id->position map, same rows."""
+    from types import SimpleNamespace
+    from cjm_transcript_correction_qt.event_payload import event_rows
+    segs = [SimpleNamespace(id=f"s{i}", index=i, text=f"t{i}", start_time=float(i), end_time=i + 0.9)
+            for i in range(2000)]
+    props = {f"s{i}": [{"proposal_id": f"p{i}", "label": "inhale", "tier": 1,
+                        "start_time": i + 0.9, "end_time": i + 1.0, "score": 0.5}]
+             for i in range(0, 2000, 2)}
+    props["ghost"] = [{"proposal_id": "px", "label": "inhale", "tier": 1,
+                       "start_time": 5.0, "end_time": 5.1}]
+    view = SimpleNamespace(segments=segs, event_proposals=props)
+    rows = event_rows(view)
+    assert len(rows) == 1000
+    assert [pos for pos, _ in rows[:3]] == [0, 2, 4]          # time order, positions resolved
+    assert all(p["proposal_id"] != "px" for _, p in rows)     # unknown anchor skipped

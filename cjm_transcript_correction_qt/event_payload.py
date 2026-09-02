@@ -21,19 +21,30 @@ Line = List[Tuple[str, str]]
 _EPS = 0.05
 
 
+def _anchor_positions(view: Any) -> Dict[str, int]:
+    """segment id -> spine position, built ONCE per derivation. The
+    per-anchor linear scan this replaces was O(segments x proposals): on
+    the 4466-segment / 2812-proposal Show 62 spine it cost ~0.5 s per
+    navigation frame (four derivations a frame — the 0.87 s lag sighting,
+    2026-09-02)."""
+    return {seg.id: i for i, seg in enumerate(view.segments)}
+
+
 def _anchor_index(view: Any, anchor_id: str) -> Optional[int]:
-    for i, seg in enumerate(view.segments):
-        if seg.id == anchor_id:
-            return i
-    return None
+    return _anchor_positions(view).get(anchor_id)
 
 
 def event_rows(view: Any) -> List[Tuple[int, Dict[str, Any]]]:
     """(anchor position, proposal) pairs for every pending event proposal,
-    time order — the flattening of view.event_proposals (anchor id -> list)."""
+    time order — the flattening of view.event_proposals (anchor id -> list).
+    One pass over the spine, one over the proposals."""
+    props_by_anchor = getattr(view, "event_proposals", None) or {}
+    if not props_by_anchor:
+        return []
+    positions = _anchor_positions(view)
     out: List[Tuple[int, Dict[str, Any]]] = []
-    for anchor_id, props in (getattr(view, "event_proposals", None) or {}).items():
-        pos = _anchor_index(view, anchor_id)
+    for anchor_id, props in props_by_anchor.items():
+        pos = positions.get(anchor_id)
         if pos is None:
             continue
         for p in props or []:
