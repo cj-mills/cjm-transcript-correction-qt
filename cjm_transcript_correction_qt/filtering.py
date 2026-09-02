@@ -58,6 +58,7 @@ class FilterLane:
     show_tier2: bool = False
     span: Optional[Tuple[Optional[float], Optional[float]]] = None
     cursor: int = 0
+    selected_id: Optional[str] = None   # the worklist's chosen proposal (tie-break among several at one segment)
     pending_index: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     strata_map: Dict[str, List[str]] = field(default_factory=dict)
 
@@ -101,12 +102,69 @@ class FilterLane:
                                         show_tier2=self.show_tier2,
                                         materialized=self.mark_ids)
 
-    def current(self) -> Optional[Dict[str, Any]]:
+    def at_cursor(self, view: Any, pos: int) -> List[Dict[str, Any]]:
+        """The pending proposals whose span covers spine position `pos`
+        (time order) — several when classes overlap on one segment."""
+        return [p for p in self.pending() if pos in self.covering_positions(view, p)]
+
+    def current(self, view: Any = None, pos: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """THE proposal a gesture acts on. Cursor-anchored (the fix for the
+        off-cursor accept, 2026-09-02): the pending proposal covering the
+        SPINE cursor — `selected_id` tie-breaks when several cover it, else
+        the first in time order — and None when nothing pending covers the
+        cursor. A gesture never acts on a row the walk is not standing on.
+        The worklist cursor follows the resolution. The legacy no-argument
+        form keeps the worklist-index semantics for callers without a spine."""
         rows = self.pending()
         if not rows:
             return None
-        self.cursor = max(0, min(len(rows) - 1, self.cursor))
-        return rows[self.cursor]
+        if view is None or pos is None:
+            self.cursor = max(0, min(len(rows) - 1, self.cursor))
+            return rows[self.cursor]
+        here = self.at_cursor(view, pos)
+        if not here:
+            return None
+        p = next((q for q in here if q.get("proposal_id") == self.selected_id), here[0])
+        self.cursor = rows.index(p)
+        return p
+
+    def focus_row(self, view: Any, pos: int) -> Optional[Dict[str, Any]]:
+        """The worklist row to highlight + card: the cursor's proposal when
+        one is pending there, else the selected row if still pending, else
+        the next pending row at or after the cursor (the walk's lookahead)."""
+        rows = self.pending()
+        if not rows:
+            return None
+        p = self.current(view, pos)
+        if p is None:
+            p = next((q for q in rows if q.get("proposal_id") == self.selected_id), None)
+        if p is None:
+            firsts = [(self.covering_positions(view, q)[:1] or [None])[0] for q in rows]
+            p = next((q for q, fp in zip(rows, firsts) if fp is not None and fp >= pos), rows[-1])
+        self.cursor = rows.index(p)
+        return p
+
+    def step(self, view: Any, pos: int, direction: int) -> Optional[Dict[str, Any]]:
+        """n/N: the next/previous pending proposal in worklist (time) order
+        from the cursor's own proposal when one is pending there — so the
+        second class on the same segment is one step away — else the first
+        pending row strictly after/before the cursor. Selects it."""
+        rows = self.pending()
+        if not rows:
+            return None
+        cur = self.current(view, pos)
+        if cur is not None:
+            i = rows.index(cur) + (1 if direction > 0 else -1)
+            p = rows[i] if 0 <= i < len(rows) else None
+        else:
+            firsts = [(self.covering_positions(view, q)[:1] or [None])[0] for q in rows]
+            cands = [q for q, fp in zip(rows, firsts)
+                     if fp is not None and (fp > pos if direction > 0 else fp < pos)]
+            p = (cands[0] if direction > 0 else cands[-1]) if cands else None
+        if p is not None:
+            self.selected_id = p.get("proposal_id")
+            self.cursor = rows.index(p)
+        return p
 
     def covering_positions(self, view: Any, p: Dict[str, Any]) -> List[int]:
         """Positions in the CURRENT effective spine whose text-bearing

@@ -680,6 +680,15 @@ class CorrectionWindow(QMainWindow):
         # The filter lane's sets ride the workspace (proposals/ beside the
         # inhale sets); the read is loop-side and lands through filter_loaded.
         self._filter = None
+        self._reload_filter_lane()
+
+    def _reload_filter_lane(self) -> None:
+        """Re-read the filter lane's sets/strata/gate for the open spine
+        (loop-side; lands through filter_loaded). Also the re-check when
+        the lane is entered with no set loaded — a set ingested AFTER the
+        spine opened used to need an app relaunch (user sighting 2026-09-02)."""
+        if self.view is None:
+            return
         ws = resolve_workspace(explicit=None)
         if ws is not None:
             f = self.sess.submit(load_filter_lane(self.view, str(ws.root)))
@@ -1315,12 +1324,17 @@ class CorrectionWindow(QMainWindow):
         self._cycle_lane(-1)
 
     def _cycle_lane(self, delta: int) -> None:
+        # The filter lane is always in the cycle once a spine is open: landing
+        # on it with no set loaded re-reads the workspace (a set ingested after
+        # the spine opened appears without a relaunch); until the read lands
+        # the lane reports "no filtering proposal set".
         order = (["walk", "assign"]
                  + (["propose"] if self.view.proposals_meta else [])
-                 + (["filter"] if self._filter is not None and self._filter.sets else [])
-                 + ["annotate"])
+                 + ["filter", "annotate"])
         self.lane = order[(order.index(self.lane) + delta) % len(order)] \
             if self.lane in order else "walk"
+        if self.lane == "filter" and not (self._filter is not None and self._filter.sets):
+            self._reload_filter_lane()
         self._word_anchor = None
         self._overlay_pick = None
         save_tui_state(self._graph_db_path, self.view.source_id, None,
@@ -2075,7 +2089,11 @@ class CorrectionWindow(QMainWindow):
         if self.view is None:
             return
         self._filter = lane
-        if lane is None:
+        if lane is None or not lane.sets:
+            if self.lane == "filter":
+                self._render()
+                self._paint_status("no filtering proposal set for this spine yet — "
+                                   "ingest one, then tab away and back")
             return
         if self.lane == "filter":
             self._render()
@@ -2100,7 +2118,7 @@ class CorrectionWindow(QMainWindow):
             self._render_event_hitl()
             return
         f, view = self._filter, self.view
-        p = f.current()
+        p = f.focus_row(view, self.cursor)   # cursor's proposal, else the walk's lookahead
         model = f.manifest.get("model") or {}
         pending = len(f.pending())
         hidden = (0 if f.show_tier2 else
@@ -2147,10 +2165,16 @@ class CorrectionWindow(QMainWindow):
             return
         if which != "filter":
             return
+        rows = self._filter.pending()
+        if not (0 <= i < len(rows)):
+            return
+        # A worklist pick SELECTS (the tie-break among proposals sharing the
+        # cursor segment) and previews the card; gestures still resolve at
+        # the SPINE cursor — enter walks there.
         self._filter.cursor = i
+        self._filter.selected_id = rows[i].get("proposal_id")
         self.hitl.worklist.set_payload(
-            self._filter.payload_lines(self.view, self._filter.current(),
-                                       width=self._payload_width()))
+            self._filter.payload_lines(self.view, rows[i], width=self._payload_width()))
 
     def _on_hitl_activate(self, key) -> None:
         """Double-click / enter on a worklist row: jump the walk to it."""
@@ -2167,6 +2191,7 @@ class CorrectionWindow(QMainWindow):
         for i, p in enumerate(self._filter.pending()):
             if p.get("proposal_id") == key:
                 self._filter.cursor = i
+                self._filter.selected_id = key
                 self._filter_jump_to(p)
                 return
 
@@ -2199,6 +2224,7 @@ class CorrectionWindow(QMainWindow):
                                "proposal — , . mark the run at the cursor, E accepts over it")
             return
         self.cursor = pos[0]
+        self._filter.selected_id = p.get("proposal_id")   # the jump SELECTS its proposal
         self._word_cursor, self._word_anchor = 0, None
         self._render()
         self._autoplay_timer.stop()
@@ -2212,37 +2238,60 @@ class CorrectionWindow(QMainWindow):
         if not self._filter_ready():
             self._paint_status("no filtering proposal set for this spine")
             return None
-        p = self._filter.current()
+        p = self._filter.current(self.view, self.cursor)
         if p is None:
-            self._paint_status("no pending proposals"
-                               + ("" if self._filter.show_tier2 else " · t shows the audition tier"))
+            tier_hint = "" if self._filter.show_tier2 else " · t shows the audition tier"
+            if self._filter.pending():
+                self._paint_status("no pending proposal at the cursor segment · n/N jump to one"
+                                   + tier_hint)
+            else:
+                self._paint_status("no pending proposals" + tier_hint)
         return p
 
     def action_filter_jump(self) -> None:
-        p = self._filter_current_or_status()
-        if p is not None:
-            self._filter_jump_to(p)
+        """enter: walk to the worklist's highlighted row."""
+        if not self._filter_ready():
+            self._filter_current_or_status()
+            return
+        p = self._filter.focus_row(self.view, self.cursor)
+        if p is None:
+            self._filter_current_or_status()
+            return
+        self._filter_jump_to(p)
 
     def _jump_filter(self, direction: int) -> None:
         if not self._filter_ready():
             return
         f, view = self._filter, self.view
-        rows = f.pending()
-        if not rows:
+        if not f.pending():
             self._filter_current_or_status()
             return
-        firsts = [(f.covering_positions(view, p)[:1] or [None])[0] for p in rows]
-        cands = [i for i, fp in enumerate(firsts)
-                 if fp is not None and (fp > self.cursor if direction > 0 else fp < self.cursor)]
-        if not cands:
+        p = f.step(view, self.cursor, direction)
+        if p is None:
             self._paint_status("no more pending proposals this way")
             return
-        f.cursor = cands[0] if direction > 0 else cands[-1]
-        self._filter_jump_to(rows[f.cursor])
+        self._filter_jump_to(p)
 
     def action_filter_audition(self) -> None:
-        p = self._filter_current_or_status()
+        """R: audition the cursor's pending proposal; with none pending there,
+        re-sound the live stratum under the cursor (an accepted row replays,
+        never the next row)."""
+        if not self._filter_ready():
+            self._filter_current_or_status()
+            return
+        f = self._filter
+        p = f.current(self.view, self.cursor)
         if p is None:
+            live = f.strata_at(self.view.segments[self.cursor].id)
+            if not live:
+                self._filter_current_or_status()
+                return
+            pay = live[-1].get("payload") or {}
+            if self.player is not None:
+                self.player.stop()
+            self._play_span_source(float(pay.get("start_time") or 0.0),
+                                   float(pay.get("end_time") or 0.0),
+                                   note=f" · ▣ {pay.get('category')} (live stratum) · x retracts")
             return
         if self.player is not None:
             self.player.stop()
@@ -2353,9 +2402,9 @@ class CorrectionWindow(QMainWindow):
         cls = raw.strip()
         if not cls[:1].isalnum():
             return {"status": "relabel: a class token is needed (letter/digit-led)"}
-        p = self._filter.current() if self._filter_ready() else None
+        p = self._filter.current(self.view, self.cursor) if self._filter_ready() else None
         if p is None:
-            return {"status": "relabel: no pending proposal"}
+            return {"status": "relabel: no pending proposal at the cursor"}
         return await self._do_filter_accept(p, category=cls)
 
     def action_filter_mark(self) -> None:
@@ -2372,9 +2421,9 @@ class CorrectionWindow(QMainWindow):
         if not cls[:1].isalnum():
             return {"status": "mark: a class token is needed"}
         f, view = self._filter, self.view
-        p = f.current() if self._filter_ready() else None
+        p = f.current(view, self.cursor) if self._filter_ready() else None
         if p is None:
-            return {"status": "mark: no pending proposal"}
+            return {"status": "mark: no pending proposal at the cursor"}
         pos = f.covering_positions(view, p)
         ids = ([view.segments[i].id for i in pos] if f.drifted(view, p)
                else list(p.get("segment_ids") or []))

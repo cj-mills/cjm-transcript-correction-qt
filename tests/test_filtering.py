@@ -171,3 +171,77 @@ def test_cards_and_status_paint_the_lane():
     verbs = {e["verb"] for e in panes.hint_entries(s)}
     assert {"filter_accept", "filter_accept_span", "filter_mark", "filter_watermark"} <= verbs
     assert panes.default_pins(s)[0] == "filter_accept"
+
+
+# ---- cursor-anchored selection (the off-cursor accept, 2026-09-02) -------------
+
+def two_on_one_segment():
+    """ch05's #38: a research-mark AND a quotation both cover the same
+    segment; the quotation runs on over the next two."""
+    view = make_view([
+        seg(0, text="Prussia built schools", start=100.0, end=105.0),
+        seg(1, text="As the philosopher Fichte put it,", start=113.8, end=116.5),
+        seg(2, text="the citizens should be made able", start=117.1, end=121.1),
+        seg(3, text="and willing to use their own minds", start=121.5, end=126.6),
+        seg(4, text="Lego used to come in all colors", start=363.6, end=369.4),
+    ], skeleton_hash="sha256:skel", source_id="src-1")
+    proposals = [
+        _prop("p-rm", "research-mark", 113.8, 116.5, ["s1"], quote="Fichte"),
+        _prop("p-q", "quotation", 113.8, 126.6, ["s1", "s2", "s3"], quote="the citizens"),
+        _prop("p-lego", "research-mark", 363.6, 369.4, ["s4"], tier=2, quote="Lego"),
+    ]
+    manifest = {"proposal_set_id": "propset_x", "model": {"name": "r"},
+                "pack": {"pack_id": "pack_x", "digest": "d", "segments": 5},
+                "window": {"start": 0.0, "end": 400.0}}
+    return view, FilterLane(sets=[{"manifest": manifest, "path": "/x/m.json",
+                                   "proposals": proposals}], show_tier2=True)
+
+
+def test_current_is_the_cursor_segments_pending_proposal_never_the_next_row():
+    view, f = two_on_one_segment()
+    f.cursor = 2   # a stale worklist index (pointing at the Lego row) must not win
+    assert f.current(view, 1)["proposal_id"] == "p-rm"     # first in time order at #1
+    assert f.cursor == 0                                    # worklist cursor follows
+    assert f.current(view, 0) is None                       # nothing pending at #0
+    assert f.current(view, 2)["proposal_id"] == "p-q"       # only the quotation covers #2
+
+
+def test_after_accepting_one_class_the_other_still_pending_on_that_segment():
+    view, f = two_on_one_segment()
+    f.selected_id = "p-rm"
+    assert f.current(view, 1)["proposal_id"] == "p-rm"
+    f.echo_stratum(_stratum("c1", "research-mark", ["s1"], 113.8, 116.5, proposal_id="p-rm"))
+    p = f.current(view, 1)                                  # the cursor did not move
+    assert p is not None and p["proposal_id"] == "p-q", "the quotation is still pending at #1"
+    assert f.cursor == f.pending().index(p)
+
+
+def test_selected_id_tie_breaks_among_proposals_on_one_segment():
+    view, f = two_on_one_segment()
+    f.selected_id = "p-q"
+    assert f.current(view, 1)["proposal_id"] == "p-q"
+    f.selected_id = "p-nope"                                # a stale selection falls back
+    assert f.current(view, 1)["proposal_id"] == "p-rm"
+
+
+def test_step_reaches_the_second_class_on_the_same_segment_then_moves_on():
+    view, f = two_on_one_segment()
+    assert f.step(view, 1, +1)["proposal_id"] == "p-q"      # from p-rm at #1: next in list order
+    assert f.selected_id == "p-q"
+    assert f.step(view, 1, +1)["proposal_id"] == "p-lego"   # then the next segment's row
+    assert f.step(view, 4, +1) is None                      # end of the list
+    assert f.step(view, 4, -1)["proposal_id"] == "p-q"      # back: previous in list order
+    assert f.step(view, 0, +1)["proposal_id"] == "p-rm"     # no proposal at #0: first after it
+    assert f.step(view, 0, -1) is None
+
+
+def test_focus_row_looks_ahead_when_the_cursor_has_nothing_pending():
+    view, f = two_on_one_segment()
+    assert f.focus_row(view, 0)["proposal_id"] == "p-rm"    # next pending at/after #0
+    assert f.focus_row(view, 3)["proposal_id"] == "p-q"     # covers #3
+    f.selected_id = "p-lego"
+    assert f.focus_row(view, 0)["proposal_id"] == "p-lego"  # a live selection wins the card
+    for p in list(f.pending()):
+        f.echo_stratum(_stratum("c" + p["proposal_id"], p["category"], p["segment_ids"],
+                                p["start_time"], p["end_time"], proposal_id=p["proposal_id"]))
+    assert f.focus_row(view, 0) is None
