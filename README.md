@@ -9,6 +9,8 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 - **`cjm_transcript_correction_qt.__init__`** — Qt shell for the transcript-correction workbench — a DIRECT PORT of
 - **`cjm_transcript_correction_qt.app`** — The Qt correction workbench: the same center-pinned segment walk, lane
 - **`cjm_transcript_correction_qt.cli`** — Console-script driver for the Qt shell: the SAME argument surface and
+- **`cjm_transcript_correction_qt.event_payload`** — The EVENT-SPAN payload of the kit HITL confirm component (55bcc3c5, the
+- **`cjm_transcript_correction_qt.filtering`** — The FILTER lane's state + pure builders (work item 55bcc3c5, the filtering
 - **`cjm_transcript_correction_qt.finetune_form`** — Modal finetune-launch form (DECs 48eff28b + 99280f79) on the kit
 - **`cjm_transcript_correction_qt.panes`** — Pure paint builders for the correction Qt shell — the Textual paint logic,
 - **`cjm_transcript_correction_qt.respine_dialog`** — Modal transfer dialog for the spine picker (work item 9af9793a — the
@@ -23,6 +25,22 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 ### `cjm_transcript_correction_qt.cli`
 
 - `main` _function_ — Resolve the shared launch surface, run the Qt correction window.
+
+### `cjm_transcript_correction_qt.event_payload`
+
+- `accept_shape` _function_ — The shape the a-gesture takes on this row (the propose lane's own
+- `event_items` _function_ — Kit worklist items for the pending event proposals.
+- `event_key` _function_ — The worklist key: the proposal id when the set carries one, else the
+- `event_payload_lines` _function_ — The event PayloadCard: label / tier / span / duration / anchor index /
+- `event_provenance` _function_
+- `event_rows` _function_ — (anchor position, proposal) pairs for every pending event proposal,
+- `event_verdicts` _function_ — The strip's arguments for the propose lane: pending per tier (the
+
+### `cjm_transcript_correction_qt.filtering`
+
+- `FilterLane` _class_ — The lane's state for ONE open spine: the sets found for it (newest
+- `load_filter_lane` _function_ — Loop-side loader: the sets for this source + spine, the live strata
+- `load_pack` _function_ — The pack a set cites, when the workspace still holds it (None = quote-only).
 
 ### `cjm_transcript_correction_qt.finetune_form`
 

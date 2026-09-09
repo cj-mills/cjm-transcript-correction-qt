@@ -822,6 +822,7 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
                 e("filter_accept_span", "E", "accept over span", "Confirm"),
                 e("filter_relabel", "L", "relabel + accept", "Confirm"),
                 e("filter_mark", "m", "accept as mark", "Confirm"),
+                e("filter_fix", "f", "apply fix + mark", "Confirm"),
                 e("filter_retract", "x", "retract stratum", "Confirm"),
                 e("filter_watermark", "W", "lane watermark", "Confirm"),
                 e("filter_next", "n/N", "jump proposal", "Worklist"),

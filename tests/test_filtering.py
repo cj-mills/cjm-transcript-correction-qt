@@ -128,9 +128,47 @@ def test_echoes_move_rows_out_of_the_worklist_and_into_the_bench():
     assert prov["session"] == "sess-123 · actor human" and prov["window"] == "00:02.1–15:35.0"
 
 
+def test_fixable_prefers_the_pending_row_then_a_marked_one_never_an_applied_one():
+    """The fix gesture's target: the cursor's pending proposal; else a proposal
+    already accepted AS A MARK over the cursor (attention landed earlier, the
+    text lands now); nothing once its fix is the effective text."""
+    f, view = lane(), spine()
+    body = next(p for p in f.proposals if p["proposal_id"] == "p-body")
+    body["replacement"] = "The sequence of school curricula,"
+    body["evidence"]["text"] = "The sequence of school curricula"
+    assert f.fixable(view, 3)["proposal_id"] == "p-body"          # pending at #3
+    f.echo_mark("p-body")
+    assert f.current(view, 3) is None                             # no longer pending …
+    assert f.fixable(view, 3)["proposal_id"] == "p-body"          # … but still fixable as a mark
+    f.echo_fix("p-body")
+    assert f.fixable(view, 3) is None                             # applied: nothing to fix
+    assert f.fixable(view, 7) is None                             # nothing covers #7
+    t1, _t2, _wm, _extra = f.verdicts()
+    assert t1["accepted"] == 1                                    # the fix benches accepted
+    assert "p-body" not in [p["proposal_id"] for p in f.pending()]
+
+
+def test_payload_lines_paint_the_fix_and_flag_a_changed_line():
+    f, view = lane(), spine()
+    body = next(p for p in f.proposals if p["proposal_id"] == "p-body")
+    body["replacement"] = "The sequence of school curricula,"
+    body["evidence"]["text"] = "The sequence of school curricula"
+    flat = ["".join(t for t, _ in ln) for ln in f.payload_lines(view, body, width=80)]
+    fix = next(l for l in flat if l.startswith("Fix: "))
+    assert "The sequence of school curricula → The sequence of school curricula," in fix
+    assert "f applies it" in fix and not any("changed since the pack" in l for l in flat)
+    view.segments[3].text = "The sequence of school curricula forces"   # walk lane edited it
+    flat = ["".join(t for t, _ in ln) for ln in f.payload_lines(view, body, width=80)]
+    assert any("changed since the pack" in l for l in flat)
+    header = next(p for p in f.proposals if p["proposal_id"] == "p-header")
+    assert not any(l.startswith("Fix: ") for l in
+                   ("".join(t for t, _ in ln) for ln in f.payload_lines(view, header, width=80)))
+
+
 def test_lane_gate_and_key_table():
     ok = SimpleNamespace(stage="correct", lane="filter", view=None)
     assert CorrectionWindow._allowed(ok, "filter_accept")
+    assert CorrectionWindow._allowed(ok, "filter_fix")       # the lane's one text-touching gesture
     assert CorrectionWindow._allowed(ok, "next") and CorrectionWindow._allowed(ok, "back")
     assert not CorrectionWindow._allowed(ok, "edit")         # the lane never edits text
     assert not CorrectionWindow._allowed(ok, "nudge_end_earlier")
@@ -148,6 +186,7 @@ def test_lane_gate_and_key_table():
     bound = {a for acts in table.values() for a, _ in acts}
     assert FILTER_ONLY_ACTIONS <= bound
     assert [a for a, _ in table["E"]] == ["filter_accept_span"]
+    assert "filter_fix" in [a for a, _ in table["f"]]
     assert "filter_span_start" in [a for a, _ in table[","]]
     assert "filter_jump" in [a for a, _ in table["enter"]]
 

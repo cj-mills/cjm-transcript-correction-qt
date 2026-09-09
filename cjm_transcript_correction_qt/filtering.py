@@ -28,8 +28,8 @@ from cjm_substrate_qt_kit.hitl import fmt_ts
 from cjm_transcript_correction_core.graph import load_extraction_gates, load_source_corrections
 from cjm_transcript_correction_core.strata import (active_strata, bench_filter_proposals,
                                                    FILTER_LANE, load_filter_proposal_sets,
-                                                   materialized_mark_ids, pending_filter_proposals,
-                                                   strata_index)
+                                                   materialized_fix_ids, materialized_mark_ids,
+                                                   pending_filter_proposals, strata_index)
 
 from . import panes
 
@@ -53,6 +53,7 @@ class FilterLane:
     set_index: int = 0
     strata: List[Dict[str, Any]] = field(default_factory=list)
     mark_ids: set = field(default_factory=set)
+    fix_ids: set = field(default_factory=set)   # proposals APPLIED as text edits (the apply path)
     gate: Dict[str, Any] = field(default_factory=dict)
     packs: Dict[str, Optional[Dict[str, Any]]] = field(default_factory=dict)
     show_tier2: bool = False
@@ -100,7 +101,33 @@ class FilterLane:
         behind show_tier2)."""
         return pending_filter_proposals(self.proposals, self.strata,
                                         show_tier2=self.show_tier2,
-                                        materialized=self.mark_ids)
+                                        materialized=self.mark_ids | self.fix_ids)
+
+    def fixable(self, view: Any, pos: int) -> Optional[Dict[str, Any]]:
+        """THE proposal the fix gesture acts on at spine position `pos`: the
+        cursor's pending proposal when one is there (the usual case), else a
+        proposal already materialized AS A MARK over that position and not yet
+        applied — the row a human accepted as attention earlier and now fixes
+        with the text in hand (the 2026-09-02 asr-error marks). None once the
+        proposal's fix is the effective text (it is in fix_ids)."""
+        p = self.current(view, pos)
+        if p is not None:
+            return p
+        for q in sorted(self.proposals, key=lambda d: float(d.get("start_time") or 0.0)):
+            pid = q.get("proposal_id")
+            if self.carried(pid) and pid not in self.fix_ids \
+                    and pos in self.covering_positions(view, q):
+                return q
+        return None
+
+    def carried(self, proposal_id: Optional[str]) -> bool:
+        """A mark or a live stratum already carries this proposal — the
+        attention half landed in an earlier sitting (pre-routing asr-error
+        rows were accepted as strata); a fix then lands the text alone."""
+        return bool(proposal_id) and (
+            proposal_id in self.mark_ids
+            or any((c.get("payload") or {}).get("proposal_id") == proposal_id
+                   for c in self.strata))
 
     def at_cursor(self, view: Any, pos: int) -> List[Dict[str, Any]]:
         """The pending proposals whose span covers spine position `pos`
@@ -227,7 +254,8 @@ class FilterLane:
 
     def bench(self) -> Dict[str, Any]:
         return bench_filter_proposals(self.proposals, self.strata, self.window,
-                                      watermark=self.watermark, mark_ids=self.mark_ids)
+                                      watermark=self.watermark, mark_ids=self.mark_ids,
+                                      fix_ids=self.fix_ids)
 
     def verdicts(self) -> Tuple[Dict[str, int], Dict[str, int], str, str]:
         """(tier-1 counts, tier-2 counts, watermark text, extra) — the strip's
@@ -277,6 +305,20 @@ class FilterLane:
             lines.extend(panes.wrap_spans([("Why: ", "dim"), (str(p["rationale"]), "")], width))
         if ev.get("quote"):
             lines.append([("Quote: ", "dim"), (f"“{ev['quote']}”", "")])
+        if p.get("replacement") is not None:
+            # The apply path's card: the fix the proposer read out of context,
+            # against the line as packed; a changed current text flags drift.
+            was = ev.get("text")
+            now = (segs[pos[0]].text if len(pos) == 1 else None)
+            lines.append([("Fix: ", "dim"), (str(was) if was is not None else "?", "dim"),
+                          (" → ", "dim"), (str(p["replacement"]), "green"),
+                          ("  · f applies it as a text edit + mark", "dim")])
+            if was is not None and now is not None and str(now) != str(was):
+                lines.append([("  ⚠ the line changed since the pack — f opens the editor "
+                               "on the current text", "yellow")])
+            elif len(pos) != 1:
+                lines.append([("  ⚠ the run is not one segment on the current spine — "
+                               "a text edit is per segment", "yellow")])
         if pos:
             lo, hi = max(0, pos[0] - context), min(len(segs), pos[-1] + 1 + context)
             for i in range(lo, hi):
@@ -312,6 +354,9 @@ class FilterLane:
     def echo_mark(self, proposal_id: str) -> None:
         self.mark_ids.add(proposal_id)
 
+    def echo_fix(self, proposal_id: str) -> None:
+        self.fix_ids.add(proposal_id)
+
     def echo_gate(self, gate: Dict[str, Any]) -> None:
         self.gate = dict(gate)
 
@@ -345,6 +390,7 @@ async def load_filter_lane(view: Any, ws_root: str) -> Optional[FilterLane]:
     lane = FilterLane(sets=sets,
                       strata=active_strata(corrections, superseded),
                       mark_ids=materialized_mark_ids(corrections, superseded),
+                      fix_ids=materialized_fix_ids(corrections, superseded),
                       gate=dict(gates.get(view.skeleton_hash) or {}))
     for s in sets:
         pid = ((s["manifest"].get("pack") or {}).get("pack_id"))

@@ -792,6 +792,7 @@ class CorrectionWindow(QMainWindow):
         add(".", "filter_span_end", self.action_filter_span_end)
         add("L", "filter_relabel", self.action_filter_relabel)
         add("m", "filter_mark", self.action_filter_mark)
+        add("f", "filter_fix", self.action_filter_fix)
         add("x", "filter_retract", self.action_filter_retract)
         add("W", "filter_watermark", self.action_filter_watermark)
         add("n", "filter_next", lambda: self._jump_filter(1))
@@ -1281,6 +1282,8 @@ class CorrectionWindow(QMainWindow):
             self._submit_gesture(self._do_submit_filter_relabel(value))
         elif mode == "filter_mark":
             self._submit_gesture(self._do_submit_filter_mark(value))
+        elif mode == "filter_fix":
+            self._submit_gesture(self._do_submit_filter_fix(value))
         elif mode == "filter_watermark":
             self._submit_gesture(self._do_submit_filter_watermark(value))
         elif mode == "annotate":
@@ -2446,6 +2449,76 @@ class CorrectionWindow(QMainWindow):
         return {"status": f"⚑ marked {cls} x{len(ids)} seg(s) from proposal "
                           f"…{str(p.get('proposal_id') or '')[-8:]} · mark {str(first)[:8]}",
                 "status_first": True, "play": ("span", ps, pe, f" · ⚑ {cls}")}
+
+    def action_filter_fix(self) -> None:
+        """f: the fidelity-edit APPLY path (context-evidence corrections,
+        d162cd64). The proposal at the cursor — pending, or already accepted
+        AS A MARK — lands as the walk lane's own text_content correction on
+        the ONE segment under its span plus the class-family mark. The editor
+        opens on the row's replacement (else the current text) so the human
+        reads the one line before it commits; a line that changed since the
+        pack seeds the current text instead, never the stale fix."""
+        if not self._filter_ready():
+            self._paint_status("no filtering proposal set for this spine")
+            return
+        f, view = self._filter, self.view
+        p = f.fixable(view, self.cursor)
+        if p is None:
+            self._paint_status("fix: no pending or marked proposal at the cursor segment · "
+                               "n/N jump to one")
+            return
+        pos = f.covering_positions(view, p)
+        if len(pos) != 1:
+            self._paint_status(f"fix refused: the span covers {len(pos)} text segment(s) of the "
+                               "current spine — a text edit is per segment")
+            return
+        seg = view.segments[pos[0]]
+        packed = (p.get("evidence") or {}).get("text")
+        fix = p.get("replacement")
+        seed = (fix if fix is not None and (packed is None or str(packed) == str(seg.text))
+                else seg.text)
+        self._open_editor("filter_fix", str(seed or ""),
+                          status=f"apply as a TEXT EDIT + {p.get('category')} mark on #{seg.index}"
+                                 f" · was “{seg.text}” · enter commits · esc cancels")
+
+    async def _do_submit_filter_fix(self, new_text: str):
+        f, view = self._filter, self.view
+        p = f.fixable(view, self.cursor) if self._filter_ready() else None
+        if p is None:
+            return {"status": "fix: no pending or marked proposal at the cursor"}
+        pos = f.covering_positions(view, p)
+        if len(pos) != 1:
+            return {"status": "fix refused: the run is not one segment on the current spine"}
+        seg = view.segments[pos[0]]
+        if not new_text.strip():
+            return {"status": "fix: empty text — pruning is the walk lane's gesture"}
+        if new_text == seg.text:
+            return {"status": f"fix: #{seg.index} already reads that — nothing applied"}
+        model = f.manifest.get("model") or {}
+        note = f"applied from proposal ({model.get('name')}): {p.get('rationale') or ''}".strip()
+        pid = p.get("proposal_id")
+        cid = await commit_text_correction(
+            view.queue, view.graph_id, view.source_id, seg.id, new_text, self.session_id,
+            old_text=seg.text, actor=self.actor, journal_path=self._journal_path,
+            rationale=note, proposal_id=pid, proposal_set_id=f.set_id)
+        marked = ""
+        if not f.carried(pid):
+            mid = await commit_mark_correction(
+                view.queue, view.graph_id, view.source_id,
+                {"kind": "segment", "segment_id": seg.id}, str(p.get("category")),
+                self.session_id, actor=self.actor, note=note, journal_path=self._journal_path,
+                proposal_id=pid, proposal_set_id=f.set_id)
+            f.echo_mark(pid)
+            marked = f" · ⚑ {p.get('category')} {str(mid)[:8]}"
+        was = seg.text
+        seg.text = new_text
+        self._marks[pos[0]] = "corrected"
+        view.refresh_turn_proposal(seg.id)
+        f.echo_fix(pid)
+        return {"status": f"✎ applied on #{seg.index}: “{was}” → “{new_text}” · text {str(cid)[:8]}"
+                          + marked,
+                "status_first": True,
+                "play": ("span", float(seg.start_time), float(seg.end_time), " · ✎ fix")}
 
     def action_filter_retract(self) -> None:
         if not self._filter_ready():
