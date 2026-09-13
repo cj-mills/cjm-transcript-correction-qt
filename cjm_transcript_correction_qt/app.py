@@ -70,6 +70,7 @@ from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_b
                                                   plan_chunk_split, plan_gate, plan_time_nudge,
                                                   resolve_mark_class_token, segment_word_tokens,
                                                   snap_word_span)
+from cjm_transcript_correction_core.graph import default_spine
 from cjm_transcript_correction_core.state import (load_tui_state, save_tui_state,
                                                   selector_for_spine, spine_label)
 from cjm_transcript_correction_core.strata import (FILTER_LANE, pending_filter_proposals,
@@ -606,15 +607,32 @@ class CorrectionWindow(QMainWindow):
             return
         selector = self._open_kwargs["skeleton"]
         sid, title = self._spine_source
-        if self._nav_browsing or (selector is None and len(spines) > 1):
+        # Retired spines (ruling a7617bd4) stay on the graph until compaction but
+        # never enter the picker: the roster is the LIVE spines, the default cursor
+        # is rule (c) (declared successor, else newest live), and a sole live spine
+        # opens directly by its explicit selector so reads never mix in a retired
+        # sibling. Browse mode (the spine-picker action) still lists everything,
+        # retired rows marked, so a retired spine stays reachable on purpose.
+        live = [sp for sp in spines if not sp.get("retired")]
+        self._spines_hidden = len(spines) - len(live)
+        roster = spines if self._nav_browsing else live
+        if self._nav_browsing or (selector is None and len(live) > 1):
             saved = load_tui_state(self._graph_db_path).get(sid) or {}
             last = str(saved.get("skeleton") or "")
-            self._spines = spines
+            self._spines = roster
             self.stage = "spine"
-            self.cursor = next((i for i, sp in enumerate(spines)
-                                if selector_for_spine(sp) == last), 0)
+            preferred = default_spine(roster)
+            self.cursor = next((i for i, sp in enumerate(roster)
+                                if selector_for_spine(sp) == last),
+                               next((i for i, sp in enumerate(roster) if sp is preferred), 0))
             self._render()
             self._paint_status("")   # picker landing claims the readout
+            return
+        if selector is None and len(live) == 1 and len(spines) > 1:
+            selector = selector_for_spine(live[0])
+        elif selector is None and not live and spines:
+            self._paint_status(f"⚠ every spine of {title or sid[:12]} is retired — "
+                               f"use the spine picker to open one anyway")
             return
         self._open_spine(sid, title, selector)
 

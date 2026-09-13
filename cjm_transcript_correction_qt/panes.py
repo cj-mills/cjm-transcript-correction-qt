@@ -438,8 +438,16 @@ def picker_rows(s: Any) -> List[Dict[str, Any]]:
     order = dict(getattr(s, "_coll_order", {}) or {})
     titles = dict(s._sources)
     filed: set = set()
+    hidden_retired = 0
     for c in sorted(cols, key=lambda c: (c.get("title") or "").lower()):
         ms = members.get(c["id"], [])
+        if c.get("status") == "retired":
+            # A retired collection (ruling a7617bd4) is hidden with its members —
+            # never cascaded, never listed as Unfiled; `retire-collection --unretire`
+            # brings it back.
+            filed.update(i for i, _ in ms)
+            hidden_retired += 1
+            continue
         flag = "  ⚑ proposed" if c.get("status") == "proposed" else ""
         rows.append({"kind": "header",
                      "spans": [("  " + (c.get("title") or c["id"][:12]), "bold"),
@@ -459,6 +467,9 @@ def picker_rows(s: Any) -> List[Dict[str, Any]]:
                                (f"   {len(unfiled)} source(s)", "dim")]})
         for sid, title in sorted(unfiled, key=lambda p: (p[1] or "").lower()):
             rows.append(_source_row(s, sid, title))
+    if hidden_retired:
+        rows.append({"kind": "note",
+                     "spans": [(f"  {hidden_retired} retired collection(s) hidden", "dim")]})
     return rows
 
 
@@ -499,10 +510,13 @@ def spine_picker_rows(s: Any) -> List[Dict[str, Any]]:
     filtering (65cdd573 (b)) stays discussion-first."""
     from cjm_transcript_correction_core.state import spine_label
     _, title = s._spine_source or ("", "")
+    hidden = int(getattr(s, "_spines_hidden", 0) or 0)
+    note = f"  ·  {len(s._spines)} spines coexist — pick one"
+    if hidden and not getattr(s, "_nav_browsing", False):
+        note += f"  ({hidden} retired hidden — the spine picker action lists them)"
     rows: List[Dict[str, Any]] = [
         {"kind": "note",
-         "spans": [("  ", ""), (title or "source", "bold"),
-                   (f"  ·  {len(s._spines)} spines coexist — pick one", "dim")]},
+         "spans": [("  ", ""), (title or "source", "bold"), (note, "dim")]},
         {"kind": "note", "spans": []},
     ]
     for i, sp in enumerate(s._spines):

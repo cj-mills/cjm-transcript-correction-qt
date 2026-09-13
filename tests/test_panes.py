@@ -331,3 +331,21 @@ def test_entity_name_provisional_prefix():
     assert panes.entity_name(ents, "e1") == "Ada"
     assert panes.entity_name(ents, "e2") == "?low voice"
     assert panes.entity_name(ents, "unknown-id") == "unknown-"
+
+
+def test_picker_rows_hide_retired_collections_with_their_members():
+    # ruling a7617bd4 / item eaefebd2: a retired collection is hidden, its members
+    # never fall into Unfiled, and a trailing note says how many are hidden.
+    s = SimpleNamespace(
+        _sources=[("id1", "Lecture 1 (webm)"), ("id2", "Lecture 1 (mp4)"), ("id3", "Loose One")],
+        _status={}, _purposes={},
+        _collections=[{"id": "old", "title": "GPU MODE_OLD", "status": "retired"},
+                      {"id": "new", "title": "GPU MODE", "status": "confirmed"}],
+        _coll_members={"old": [("id1", "Lecture 1 (webm)")], "new": [("id2", "Lecture 1 (mp4)")]},
+        _coll_order={}, cursor=0)
+    rows = panes.picker_rows(s)
+    joined = flat_rows(rows)
+    assert "GPU MODE_OLD" not in joined and "GPU MODE" in joined
+    items = [r["key"] for r in rows if (r.get("kind") or "item") == "item"]
+    assert items == [("id2", "Lecture 1 (mp4)"), ("id3", "Loose One")]
+    assert "1 retired collection(s) hidden" in joined
