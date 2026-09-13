@@ -53,7 +53,7 @@ from cjm_transcript_correction_core.graph import (commit_boundary_shift_correcti
                                                   commit_speech_overlay_removal,
                                                   commit_stratum_correction,
                                                   commit_stratum_retraction, commit_text_correction,
-                                                  commit_time_nudge_correction,
+                                                  commit_time_nudge_correction, default_spine,
                                                   fa_words_for_transcript)
 from cjm_transcript_correction_core.models import (ANNOTATE_LANE_ACTIONS, ANNOTATE_ONLY_ACTIONS,
                                                    ASSIGN_LANE_ACTIONS, ASSIGN_ONLY_ACTIONS,
@@ -70,7 +70,6 @@ from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_b
                                                   plan_chunk_split, plan_gate, plan_time_nudge,
                                                   resolve_mark_class_token, segment_word_tokens,
                                                   snap_word_span)
-from cjm_transcript_correction_core.graph import default_spine
 from cjm_transcript_correction_core.state import (load_tui_state, save_tui_state,
                                                   selector_for_spine, spine_label)
 from cjm_transcript_correction_core.strata import (FILTER_LANE, pending_filter_proposals,
