@@ -54,7 +54,7 @@ from cjm_transcript_correction_core.graph import (commit_boundary_shift_correcti
                                                   commit_stratum_correction,
                                                   commit_stratum_retraction, commit_text_correction,
                                                   commit_time_nudge_correction, default_spine,
-                                                  fa_words_for_transcript)
+                                                  discharge_mark, fa_words_for_transcript)
 from cjm_transcript_correction_core.models import (ANNOTATE_LANE_ACTIONS, ANNOTATE_ONLY_ACTIONS,
                                                    ASSIGN_LANE_ACTIONS, ASSIGN_ONLY_ACTIONS,
                                                    FILTER_LANE_ACTIONS, FILTER_ONLY_ACTIONS,
@@ -1107,6 +1107,16 @@ class CorrectionWindow(QMainWindow):
             j = (self.cursor + direction * step) % view.size
             if view.segments[j].id in ids:
                 self._move(j - self.cursor)
+                if ids is view.marked_ids:
+                    # A mark jump names the mark: class + rationale in the readout, so the
+                    # walk lane knows WHY it landed here without opening anything.
+                    marks = list(getattr(view, "marks_for", lambda sid: [])(view.segments[j].id))
+                    if marks:
+                        m = marks[0]
+                        mc = str((m.get("payload") or {}).get("mark_class") or "?")
+                        why = str(m.get("rationale") or "").strip()
+                        more = f" (+{len(marks) - 1} more)" if len(marks) > 1 else ""
+                        self._paint_status(f"⚑ {mc}{more}" + (f" — {why}" if why else ""))
                 return
 
     # ---- nudges / speed / shift ------------------------------------------
@@ -1159,10 +1169,11 @@ class CorrectionWindow(QMainWindow):
                 right_t = segs[i].text
             words = {"left": (left_t.split() or [None])[-1],
                      "right": (right_t.split() or [None])[0]}
-            await commit_time_nudge_correction(
+            cid = await commit_time_nudge_correction(
                 view.queue, view.graph_id, view.source_id, plan,
                 self.session_id, boundary_words=words, step_s=delta,
                 actor=self.actor, journal_path=self._journal_path)
+            await self._discharge_tier_marks([e["segment_id"] for e in plan], cid, "time nudge")
             by_id = {s.id: s for s in segs}
             for e in plan:
                 s = by_id[e["segment_id"]]
@@ -1222,10 +1233,11 @@ class CorrectionWindow(QMainWindow):
             if plan is None:
                 return {"status": f"boundary shift: nothing to {direction}"}
             moved, new_left, new_right = plan
-            await commit_boundary_shift_correction(
+            cid = await commit_boundary_shift_correction(
                 view.queue, view.graph_id, view.source_id, left.id, right.id,
                 moved, direction, self.session_id, actor=self.actor,
                 journal_path=self._journal_path)
+            await self._discharge_tier_marks([left.id, right.id], cid, "boundary shift")
             receiver = right if direction == "push" else left
             if receiver.id in view.pruned_ids:
                 prior = view.prune_correction_for(receiver.id)
@@ -1580,6 +1592,7 @@ class CorrectionWindow(QMainWindow):
             before_segment_id=plan["before_id"], label=p.get("label"),
             rank=plan["rank"], actor=self.actor,
             journal_path=self._journal_path)
+        await self._discharge_tier_marks([plan["after_id"], plan["before_id"]], insert_id, "chunk insert")
         pos = view.add_insert_local(
             {"id": insert_id,
              "payload": {"operation": "chunk_insert",
@@ -1642,6 +1655,8 @@ class CorrectionWindow(QMainWindow):
             before_segment_id=plan["before_id"], old_text=old_text,
             boundary_words=plan["boundary_words"], actor=self.actor,
             journal_path=self._journal_path)
+        await self._discharge_tier_marks([plan["segment_id"], plan["after_id"], plan["before_id"]],
+                                         ids["insert_id"], "chunk split")
         pos_r = view.split_local(i, plan["left_text"], plan["split_s"],
                                  {"id": ids["insert_id"],
                                   "payload": {"operation": "chunk_insert",
@@ -1669,6 +1684,7 @@ class CorrectionWindow(QMainWindow):
             before_segment_id=iplan["before_id"], label=p.get("label"),
             rank=iplan["rank"], actor=self.actor,
             journal_path=self._journal_path)
+        await self._discharge_tier_marks([iplan["after_id"], iplan["before_id"]], insert_id, "chunk insert")
         pos = view.add_insert_local(
             {"id": insert_id,
              "payload": {"operation": "chunk_insert",
@@ -1715,6 +1731,7 @@ class CorrectionWindow(QMainWindow):
             before_segment_id=plan["before_id"], label=p.get("label"),
             rank=plan["rank"], actor=self.actor,
             journal_path=self._journal_path)
+        await self._discharge_tier_marks([plan["after_id"], plan["before_id"]], insert_id, "chunk insert")
         pos = view.add_insert_local(
             {"id": insert_id,
              "payload": {"operation": "chunk_insert",
@@ -1734,10 +1751,11 @@ class CorrectionWindow(QMainWindow):
                                  new_t: float, words: Dict[str, Any]) -> None:
         plan = [{"segment_id": segment_id, "edge": edge,
                  "old_time": old_t, "new_time": new_t}]
-        await commit_time_nudge_correction(
+        cid = await commit_time_nudge_correction(
             self.view.queue, self.view.graph_id, self.view.source_id, plan,
             self.session_id, boundary_words=words, step_s=new_t - old_t,
             actor=self.actor, journal_path=self._journal_path)
+        await self._discharge_tier_marks([segment_id], cid, "span nudge")
         seg = next((s for s in self.view.segments if s.id == segment_id), None)
         if seg is not None:
             if edge == "start":
@@ -1851,6 +1869,8 @@ class CorrectionWindow(QMainWindow):
             before_segment_id=plan["before_id"], old_text=old_text,
             boundary_words=plan["boundary_words"], actor=self.actor,
             journal_path=self._journal_path)
+        await self._discharge_tier_marks([plan["segment_id"], plan["after_id"], plan["before_id"]],
+                                         ids["insert_id"], "chunk split")
         pos = view.split_local(i, plan["left_text"], plan["split_s"],
                                {"id": ids["insert_id"],
                                 "payload": {"operation": "chunk_insert",
@@ -1983,10 +2003,36 @@ class CorrectionWindow(QMainWindow):
              "right_segment_id": view.segments[i + 1].id},
             self._mark_class, None)
 
+    async def _discharge_tier_marks(self, seg_ids, correction_id: str, what: str) -> int:
+        """An edit that touches a segment DISCHARGES the attention tier's open marks on
+        it — capability-actored marks only; a human mark stays until its author closes
+        it. The committed correction SUPERSEDES each mark (`discharge_mark`, the closure
+        build_mark_correction names), so the ⚑ clears without the M · - · Enter round
+        trip (user ask 2026-09-14). Returns the count cleared."""
+        view = self.view
+        n = 0
+        for sid in dict.fromkeys(s for s in seg_ids if s):
+            for m in list(view.marks_for(sid)):
+                if not str(m.get("actor") or "").startswith("capability:"):
+                    continue
+                await discharge_mark(view.queue, view.graph_id, view.source_id, m["id"],
+                                     correction_id, self.session_id, actor=self.actor,
+                                     note=f"discharged by {what}", journal_path=self._journal_path)
+                view.dismiss_mark_local(m["id"])
+                n += 1
+        return n
+
     def action_mark_editor(self) -> None:
         menu = self._mark_class_menu()
+        seg = self.view.segments[self.cursor]
+        marks = self.view.marks_for(seg.id)
+        # A segment carrying ONLY capability marks (the attention tier's) prefills the
+        # dismissal, so M · Enter clears a false positive (user ask 2026-09-14: the
+        # four-step round trip was the walk's pace limiter).
+        only_tier = bool(marks) and all(str(m.get("actor") or "").startswith("capability:")
+                                        for m in marks)
         self._open_editor(
-            "mark", f"{self._mark_class} ",
+            "mark", "- " if only_tier else f"{self._mark_class} ",
             status='mark: class-or-# ["snippet"] [note] · - dismiss · '
                    + " ".join(f"{i + 1}:{c}" for i, c in enumerate(menu)))
 

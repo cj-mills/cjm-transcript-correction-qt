@@ -272,9 +272,28 @@ def card_lines(s: Any, pos: int, width: int) -> Tuple[List[Line], int]:
         body = chip + body
     elif s.lane == "annotate" and pos == s.cursor and seg.text:
         body = annotate_body(s, seg)
+    # Open marks paint their CLASS on the card (a ⚑ alone cannot tell an attention-tier
+    # class from a hand mark — user ask 2026-09-14); the cursor card adds each mark's
+    # rationale as a dim line under the body, so the walk lane reads WHY it was flagged.
+    marks = (list(getattr(view, "marks_for", lambda sid: [])(seg.id))
+             if seg.id in view.marked_ids else [])
+    if marks:
+        classes: List[str] = []
+        for m in marks:
+            mc = str((m.get("payload") or {}).get("mark_class") or "?")
+            if mc not in classes:
+                classes.append(mc)
+        body = [(f"⚑{','.join(classes)[:40]} ▏", "yellow")] + body
     if abs(pos - s.cursor) > 1 and seg.text:
         body = _stylize(body, "dim")
     lane = wrap_spans(body, lane_w)
+    if marks and pos == s.cursor:
+        for m in marks:
+            mc = str((m.get("payload") or {}).get("mark_class") or "?")
+            why = str(m.get("rationale") or "").strip()
+            who = str(m.get("actor") or "")
+            line = f"  ⚑ {mc}" + (f" — {why}" if why else "") + (f"  ({who})" if who and who != "human" else "")
+            lane.extend(wrap_spans([(line, "dim yellow")], lane_w))
     lines: List[Line] = []
     a = view.aseg_index(pos)
     if a is not None and (pos == 0 or view.aseg_index(pos - 1) != a):

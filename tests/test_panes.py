@@ -58,6 +58,38 @@ def test_card_gutter_glyphs_and_time_row():
     assert any("yellow" in st for st in styles)   # ⚑
 
 
+def test_card_mark_chip_and_cursor_rationale():
+    """An open mark paints its CLASS on the card (the ⚑class chip) and, on the cursor card
+    only, one rationale line per mark with the non-human actor — so the walk lane can
+    tell an attention-tier class from a hand mark and read why it was flagged (user ask
+    2026-09-14: two ⚑ flags looked identical)."""
+    marks = {"s1": [{"id": "m1", "correction_type": "mark", "actor": "capability:attention-tier",
+                     "rationale": "boundary at 12.50s falls inside aligned word 'All'",
+                     "payload": {"operation": "mark", "mark_class": "fa-mid-word-boundary",
+                                 "anchor": {"kind": "boundary", "boundary_after": "s0",
+                                            "right_segment_id": "s1"}}},
+                    {"id": "m2", "correction_type": "mark", "actor": "human", "rationale": None,
+                     "payload": {"operation": "mark", "mark_class": "false-start",
+                                 "anchor": {"kind": "segment", "segment_id": "s1"}}}]}
+    view = make_view([seg(0, start=1.0, end=2.5), seg(1, start=2.5, end=4.0)],
+                     marks_for=lambda sid: marks.get(sid, []))
+    view.marked_ids.add("s1")
+    s = make_state(view)                                      # cursor on s0: s1 is a neighbour
+    lines, _ = panes.card_lines(s, 1, width=100)
+    text = "\n".join(flat(ln) for ln in lines)
+    assert "⚑fa-mid-word-boundary,false-start ▏" in text
+    assert "falls inside aligned word" not in text            # not the cursor: chip only
+    s.cursor = 1
+    lines, _ = panes.card_lines(s, 1, width=100)
+    text = "\n".join(flat(ln) for ln in lines)
+    assert "⚑ fa-mid-word-boundary — boundary at 12.50s falls inside aligned word 'All'" in text
+    assert "(capability:attention-tier)" in text
+    assert "⚑ false-start" in text and "(human)" not in text
+    # An unmarked card is untouched.
+    lines, _ = panes.card_lines(make_state(view), 0, width=100)
+    assert "⚑" not in "\n".join(flat(ln) for ln in lines)
+
+
 def test_cursor_card_reverse_band_pads_full_width():
     view = make_view([seg(0, start=0.0, end=1.0)])
     s = make_state(view)
