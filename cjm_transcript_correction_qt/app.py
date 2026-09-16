@@ -77,9 +77,13 @@ from cjm_transcript_correction_core.strata import (FILTER_LANE, pending_filter_p
 from cjm_transcript_correction_qt.event_payload import (event_items, event_payload_lines,
                                                         event_provenance, event_rows,
                                                         event_verdicts)
+from cjm_transcript_correction_qt.escalation import (classify_refusal, cursor_for_time,
+                                                     pending_matches, readout_from, refusal_line,
+                                                     resolve_decomp_core, respine_argv)
 from cjm_transcript_correction_qt.filtering import FilterLane, load_filter_lane
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication
+from cjm_transcription_core.chunk import DEFAULT_ESCALATION_MODEL_ID
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QLineEdit, QMainWindow, QTextBrowser, QVBoxLayout, QWidget
 
 from . import panes
@@ -115,6 +119,8 @@ class CorrectionWindow(QMainWindow):
     transfer_planned = Signal(object)
     transfer_done = Signal(object)
     filter_loaded = Signal(object)   # the filter lane's sets/strata/gate read (55bcc3c5)
+    prompt_ready = Signal(object)    # the E escalation prompt render (loop-side read, 0b4d5cfa (6))
+    respine_done = Signal(object)    # the respine-chunk subprocess (worker thread) -> Qt thread
 
     def __init__(self, graph_db_path: Optional[str] = None,
                  *, source: Optional[str] = None,
@@ -166,6 +172,9 @@ class CorrectionWindow(QMainWindow):
         self._fly_cursor = 0                     # flywheel dataset cursor
         self._finetune_busy = False
         self._respine_busy = False   # export / transfer in flight (9af9793a)
+        self._escalation: Optional[Dict[str, Any]] = None   # the E render awaiting its import (chunk_range, prompt_hash, audio, at_time)
+        self._respine_pending: Optional[Dict[str, Any]] = None  # a respine subprocess awaiting the verb's answer
+        self._reopen_at_time: Optional[float] = None       # after a respine: land the reload at this source time
         self.event_capability = event_capability
         self._extract_busy = False
         self._purpose_vocab: List[str] = []
@@ -244,6 +253,8 @@ class CorrectionWindow(QMainWindow):
         self.transfer_planned.connect(self._on_transfer_planned)
         self.transfer_done.connect(self._on_transfer_done)
         self.filter_loaded.connect(self._on_filter_loaded)
+        self.prompt_ready.connect(self._on_prompt_ready)
+        self.respine_done.connect(self._on_respine_done)
         self.sess = CorrectionShellSession(manifests_dir,
                                            graph_capability=self._graph_cap)
         self.sess.start()
@@ -690,6 +701,11 @@ class CorrectionWindow(QMainWindow):
             if saved and self.view.size:
                 self.cursor = max(0, min(self.view.size - 1,
                                          int(saved.get("cursor", 0))))
+        if self._reopen_at_time is not None:
+            # A respine reloaded the spine: the walk resumes at the SAME source
+            # time it stood at (0b4d5cfa (6)), not the saved cursor index.
+            self.cursor = cursor_for_time(self.view.segments, self._reopen_at_time)
+            self._reopen_at_time = None
         self._paint_status("")   # lane landing claims the readout
         self._render()
         if self.autoplay:
@@ -752,6 +768,7 @@ class CorrectionWindow(QMainWindow):
         add("x", "overlay_remove", lambda: self._submit_gesture(self._do_overlay_remove()))
         add("S", "split_chunk", self.action_split_chunk)
         add("e", "edit", self.action_edit)
+        add("E", "escalate_chunk", self.action_escalate_chunk)
         add("y", "yank", self.action_yank)
         add("right", "shift_push", lambda: self._shift("push"))
         add("d", "shift_push", lambda: self._shift("push"))
@@ -1262,6 +1279,156 @@ class CorrectionWindow(QMainWindow):
         QGuiApplication.clipboard().setText(seg.text)
         self._paint_status(f"copied segment #{seg.index} text "
                            f"({len(seg.text)} chars, clipboard)")
+
+    # ---- chunk escalation WITH decomposition (7a5e9c84; 0b4d5cfa (6)) --------
+
+    def _cursor_time(self) -> Optional[float]:
+        """The cursor segment's source start time (an insert borrows its own)."""
+        if self.view is None or not (0 <= self.cursor < len(self.view.segments)):
+            return None
+        seg = self.view.segments[self.cursor]
+        return float(seg.start_time) if seg.start_time is not None else None
+
+    def action_escalate_chunk(self) -> None:
+        """E, two phases on ONE key: with no pending escalation for the cursor's
+        chunk, RENDER the chunk's escalation prompt (clipboard) and open its
+        audio folder; with one pending, IMPORT the model's transcript — the
+        respine-chunk verb lands it and re-derives the chunk INTO this live
+        spine, then the spine reloads at the same source time. (The ratified
+        `I` is insert_labeled here, so the import rides the second E.)"""
+        if self.view is None or self.stage != "correct" or self._respine_busy:
+            return
+        t = self._cursor_time()
+        if t is None:
+            self._paint_status("escalate: the cursor segment has no source time")
+            return
+        if pending_matches(self._escalation, t):
+            self._import_escalated_chunk(t)
+            return
+        self._respine_busy = True
+        self._paint_status("rendering the chunk's escalation prompt…")
+        f = self.sess.submit(self._render_chunk_prompt(t))
+        f.add_done_callback(self.prompt_ready.emit)
+
+    async def _render_chunk_prompt(self, t: float) -> Dict[str, Any]:
+        """Loop-side: decomp-core's chunk context over the OPEN stack (reads
+        only) — the live spine's manifest lineage, the chunk at `t`, the
+        prompt with context + its template hash + the audio path."""
+        from cjm_transcript_decomp_core.respine import render_chunk_prompt, resolve_chunk_context
+        ws = resolve_workspace(explicit=None)
+        runs_dir = ws.runs_dir if ws is not None else Path("runs")
+        ctx = await resolve_chunk_context(self.sess.queue, self._graph_cap, source_id=self.view.source_id,
+                                          skeleton_selector=self.view.skeleton_hash, runs_dir=runs_dir,
+                                          at_time=t)
+        r = render_chunk_prompt(ctx)
+        r["at_time"] = t
+        return r
+
+    def _on_prompt_ready(self, fut) -> None:
+        self._respine_busy = False
+        try:
+            r = fut.result()
+        except Exception as e:
+            self._paint_status(f"⚠ escalate: {e}")
+            return
+        QGuiApplication.clipboard().setText(r["prompt"])
+        self._escalation = {"chunk": r["chunk"], "chunk_range": r["chunk_range"], "prompt_hash": r["prompt_hash"],
+                            "audio": r["audio"], "at_time": r["at_time"], "live_segments": r["live_segments"]}
+        where = ""
+        audio = Path(str(r.get("audio") or ""))
+        if audio.is_file():
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(audio.parent)))
+            where = "; audio folder opened" if opened else f"; audio at {audio.parent}"
+        else:
+            where = "; audio not on disk"
+        s, e = r["chunk_range"]
+        self._paint_status(f"prompt copied for chunk {r['chunk']} ({s:.0f}-{e:.0f}s, {r['live_segments']} live "
+                           f"segments; template {r['prompt_hash'][:15]}…){where} — E again to import the "
+                           f"model's transcript")
+
+    def _import_escalated_chunk(self, t: float) -> None:
+        """Phase two: model id + paste -> the respine-chunk verb (a subprocess of
+        this env's decomp-core console script — the app never reimplements a
+        landing); the verb's refusals come back as questions."""
+        from PySide6.QtWidgets import QInputDialog
+        esc = self._escalation or {}
+        model_id, ok = QInputDialog.getText(self, "Import escalated transcript", "External model id:",
+                                            text=DEFAULT_ESCALATION_MODEL_ID)
+        if not ok or not model_id.strip():
+            return
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Import escalated transcript",
+            f"Paste the model's transcript for chunk {esc.get('chunk')} — it lands as "
+            f"{model_id.strip()}/manual and the chunk is re-derived into this spine:")
+        if not ok or not text.strip():
+            return
+        exe = resolve_decomp_core()
+        if exe is None:
+            self._paint_status("⚠ import: the decomp-core console script is not installed in this env "
+                               "(or a sibling env) — pip install cjm-transcript-decomp-core there")
+            return
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", prefix="chunk-paste-", delete=False,
+                                          encoding="utf-8")
+        tmp.write(text)
+        tmp.close()
+        argv = respine_argv(self.view.source_id, t, self.view.skeleton_hash, tmp.name, model_id.strip(),
+                            str(esc.get("prompt_hash") or ""), self._graph_db_path,
+                            self._open_kwargs["manifests_dir"])
+        self._respine_pending = {"argv": argv, "exe": exe, "at_time": t, "chunk": esc.get("chunk"),
+                                 "model_id": model_id.strip()}
+        self._run_respine(argv, exe, f"respining chunk {esc.get('chunk')} from {model_id.strip()}")
+
+    def _run_respine(self, argv: List[str], exe: str, label: str) -> None:
+        """The verb in a worker thread (the transcription app's _run_chunk_verb
+        pattern); the result lands on the Qt thread through respine_done."""
+        import subprocess
+        import threading
+        self._respine_busy = True
+        self._paint_status(f"{label}… (landing + forced alignment; the spine reloads when it lands)")
+
+        def work() -> None:
+            try:
+                proc = subprocess.run([exe] + argv, capture_output=True, text=True)
+                self.respine_done.emit((label, proc.returncode, proc.stdout, proc.stderr))
+            except Exception as e:  # never strand the busy gate
+                self.respine_done.emit((label, -1, "", str(e)))
+        threading.Thread(target=work, name="respine-chunk", daemon=True).start()
+
+    def _on_respine_done(self, payload) -> None:
+        label, code, out, err = payload
+        self._respine_busy = False
+        pending, self._respine_pending = self._respine_pending, None
+        if code == 2 and pending is not None:
+            why = refusal_line(out) or "refused"
+            if classify_refusal(out) == "dependents":
+                from PySide6.QtWidgets import QMessageBox
+                ans = QMessageBox.question(
+                    self, "Respine chunk — dependents",
+                    f"{why}\n\nStrand the non-transferable corrections and respine anyway?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if ans == QMessageBox.Yes:
+                    self._respine_pending = pending
+                    self._run_respine(pending["argv"] + ["--strand"], pending["exe"], label + " (strand)")
+                    return
+                self._paint_status("respine declined — the chunk keeps its segments; the transcript did not land")
+                return
+            self._paint_status(f"⚠ respine refused: {why}")
+            return
+        if code != 0:
+            tail = [l for l in (err or "").splitlines() if l.strip()]
+            lines = [l for l in (out or "").splitlines() if l.strip()]
+            self._paint_status(f"⚠ {label} failed ({code}): {tail[-1] if tail else (lines[-1] if lines else 'no output')}")
+            return
+        self._escalation = None
+        headline = readout_from(out)
+        if self._last_spine is not None and pending is not None:
+            # Reload the SAME spine at the SAME source time (0b4d5cfa (6)).
+            self._reopen_at_time = float(pending["at_time"])
+            self._paint_status(f"✓ {headline} — reloading the spine…")
+            self._open_spine(*self._last_spine)
+        else:
+            self._paint_status(f"✓ {headline}")
 
     def _open_editor(self, mode: str, value: str, caret: Optional[int] = None,
                      status: Optional[str] = None) -> None:

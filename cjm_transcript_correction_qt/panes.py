@@ -906,6 +906,7 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
             e("split_chunk", "S", "split", "Edit"),
             e("mark_quick", "m/b", "⚑ mark", "Marks"),
             e("mark_editor", "M", "⚑ class", "Marks"),
+            e("escalate_chunk", "E", "escalate chunk / E again: import", "Respine"),
             e("cycle_lane", "tab", "assign lane", "App"),
             e("cancel", "esc", "stop audio", "App"),
             e("back", "B", "spine picker", "App"),

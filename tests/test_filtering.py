@@ -185,7 +185,9 @@ def test_lane_gate_and_key_table():
     table = host._key_table
     bound = {a for acts in table.values() for a, _ in acts}
     assert FILTER_ONLY_ACTIONS <= bound
-    assert [a for a, _ in table["E"]] == ["filter_accept_span"]
+    # E = the walk lane's escalate_chunk first (7a5e9c84); the filter lane's span accept
+    # still dispatches there because escalate_chunk is gated out of the filter lane.
+    assert [a for a, _ in table["E"]] == ["escalate_chunk", "filter_accept_span"]
     assert "filter_fix" in [a for a, _ in table["f"]]
     assert "filter_span_start" in [a for a, _ in table[","]]
     assert "filter_jump" in [a for a, _ in table["enter"]]
