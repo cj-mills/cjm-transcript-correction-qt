@@ -74,12 +74,12 @@ from cjm_transcript_correction_core.state import (load_tui_state, save_tui_state
                                                   selector_for_spine, spine_label)
 from cjm_transcript_correction_core.strata import (FILTER_LANE, pending_filter_proposals,
                                                    select_span_segments)
-from cjm_transcript_correction_qt.event_payload import (event_items, event_payload_lines,
-                                                        event_provenance, event_rows,
-                                                        event_verdicts)
 from cjm_transcript_correction_qt.escalation import (classify_refusal, cursor_for_time,
                                                      pending_matches, readout_from, refusal_line,
                                                      resolve_decomp_core, respine_argv)
+from cjm_transcript_correction_qt.event_payload import (event_items, event_payload_lines,
+                                                        event_provenance, event_rows,
+                                                        event_verdicts)
 from cjm_transcript_correction_qt.filtering import FilterLane, load_filter_lane
 from cjm_transcription_core.chunk import DEFAULT_ESCALATION_MODEL_ID
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
