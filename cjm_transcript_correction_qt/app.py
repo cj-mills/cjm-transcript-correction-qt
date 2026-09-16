@@ -1379,6 +1379,19 @@ class CorrectionWindow(QMainWindow):
                                  "model_id": model_id.strip()}
         self._run_respine(argv, exe, f"respining chunk {esc.get('chunk')} from {model_id.strip()}")
 
+    def _write_verb_log(self, label: str, code: int, out: str, err: str) -> Optional[str]:
+        """Persist a failed verb's stdout + stderr under the workspace's .cjm/logs
+        (else the cwd) so the cause is readable after the readout scrolls away."""
+        try:
+            ws = resolve_workspace(explicit=None)
+            root = (ws.substrate_data_dir / "logs") if ws is not None else Path(".cjm") / "logs"
+            root.mkdir(parents=True, exist_ok=True)
+            p = root / time.strftime("respine-chunk-%Y%m%d-%H%M%S.log")
+            p.write_text(f"# {label}\n# exit {code}\n\n## stdout\n{out or ''}\n\n## stderr\n{err or ''}\n")
+            return str(p)
+        except Exception:
+            return None
+
     def _run_respine(self, argv: List[str], exe: str, label: str) -> None:
         """The verb in a worker thread (the transcription app's _run_chunk_verb
         pattern); the result lands on the Qt thread through respine_done."""
@@ -1418,7 +1431,11 @@ class CorrectionWindow(QMainWindow):
         if code != 0:
             tail = [l for l in (err or "").splitlines() if l.strip()]
             lines = [l for l in (out or "").splitlines() if l.strip()]
-            self._paint_status(f"⚠ {label} failed ({code}): {tail[-1] if tail else (lines[-1] if lines else 'no output')}")
+            # The verb's FULL output lands in a log the readout names — one line
+            # of stderr never explains a failed capability load (2026-09-16).
+            log = self._write_verb_log(label, code, out, err)
+            self._paint_status(f"⚠ {label} failed ({code}): {tail[-1] if tail else (lines[-1] if lines else 'no output')}"
+                               + (f" — full output: {log}" if log else ""))
             return
         self._escalation = None
         headline = readout_from(out)
