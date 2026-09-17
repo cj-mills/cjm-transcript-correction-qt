@@ -64,7 +64,8 @@ from cjm_transcript_correction_core.models import (ANNOTATE_LANE_ACTIONS, ANNOTA
                                                    RECOMMENDED_MARK_CLASSES,
                                                    RECOMMENDED_OVERLAY_LABELS,
                                                    RECOMMENDED_STRATUM_CLASSES, SPEEDS)
-from cjm_transcript_correction_core.spine import (match_sources, neighbor_word_bound,
+from cjm_transcript_correction_core.spine import (layer_speaker_menu, match_sources,
+                                                  match_speaker_query, neighbor_word_bound,
                                                   parse_entity_input, parse_mark_input,
                                                   plan_boundary_shift, plan_chunk_insert,
                                                   plan_chunk_split, plan_gate, plan_time_nudge,
@@ -212,6 +213,16 @@ class CorrectionWindow(QMainWindow):
         self._entities: List[Dict[str, Any]] = []
         self._active_entity: Optional[str] = None
         self._accept_cluster: Optional[str] = None
+        # The assign-lane picker scope (DEC 774dbe40): the source's collection
+        # siblings + where every entity is assigned (session.py shapes), the
+        # sitting's pick order (last-picked first — it RANKS tier 2 and the
+        # search listing, never reorders tier 1), the A editor's live search
+        # listing, and the multi-match listing a bare digit picks from.
+        self._picker_scope: Dict[str, Any] = {"collections": [], "siblings": {},
+                                              "entity_sources": {}, "source_collections": {}}
+        self._recent_entities: List[str] = []
+        self._assign_matches: List[Tuple[str, str, str]] = []
+        self._assign_pinned: List[Tuple[str, str, str]] = []
         self._shift_busy = False
         self._last_shift = 0.0
         self.fold_wordless = False
@@ -303,6 +314,9 @@ class CorrectionWindow(QMainWindow):
         # Return jumped the cursor off the insert BEFORE the relabel submit
         # ran, and the submit refused itself ("cursor moved off the insert").
         self.editor.installEventFilter(self)
+        # The assign editor narrows the registry LIVE as the user types
+        # (DEC 774dbe40 (4)): the helper line re-renders the numbered matches.
+        self.editor.textChanged.connect(self._on_editor_text_changed)
         self.strip = StatusStrip()
         self.strip.set_readout("loading spine…")
         self.hints_overlay = KeyHintsOverlay(
@@ -431,11 +445,7 @@ class CorrectionWindow(QMainWindow):
             context = self._editor_helper
         elif self.stage == "correct" and self.view is not None \
                 and self.view.size and self.lane == "assign":
-            menu = self._assign_menu()
-            context = ("speakers: "
-                       + " · ".join(f"{i + 1}:{nm}"
-                                    for i, (_, nm) in enumerate(menu[:9]))
-                       + " · A new") if menu else "speakers: none yet · A new"
+            context = self._assign_context()
         elif self.stage == "correct" and self.view is not None \
                 and self.view.size and self.lane == "annotate":
             menu = self._overlay_label_menu()
@@ -666,6 +676,10 @@ class CorrectionWindow(QMainWindow):
         self.view = res["view"]
         self.session_id = res["session_id"]
         self._entities = res["entities"]
+        self._picker_scope = res.get("picker") or {
+            "collections": [], "siblings": {}, "entity_sources": {}, "source_collections": {}}
+        self._recent_entities = []
+        self._assign_matches, self._assign_pinned = [], []
         self.stage = "correct"
         state = load_tui_state(self._graph_db_path)
         try:
@@ -1561,22 +1575,96 @@ class CorrectionWindow(QMainWindow):
 
     # ---- assign lane -----------------------------------------------------
 
-    def _assign_menu(self) -> List[Tuple[str, str]]:
-        seen: List[str] = []
+    ASSIGN_DIGITS = 9   # the digit budget: tiers 1 + 2 fill it, nothing else enters a slot
+
+    def _assign_menu(self) -> List[Tuple[str, str, str]]:
+        """The layered picker (DEC 774dbe40): [(entity_id, name, tier)] —
+        this source's assigned speakers in first-appearance order (tier
+        "src", positions stable), then the collection's (tier "coll", ranked
+        by recurrence over the sibling Sources, then last-picked, then name).
+        UNTRUNCATED — `_assign_digits` is the digit-keyed slice."""
+        assigned: List[str] = []
         for s in self.view.segments:
             sp = self.view.speakers.get(s.id)
-            if sp and sp.get("entity_id") and sp["entity_id"] not in seen:
-                seen.append(sp["entity_id"])
-        rest = [d["id"] for d in self._entities if d["id"] not in seen]
-        return [(eid, panes.entity_name(self._entities, eid))
-                for eid in (seen + rest)[:9]]
+            if sp and sp.get("entity_id") and sp["entity_id"] not in assigned:
+                assigned.append(sp["entity_id"])
+        siblings = set(self._picker_scope.get("siblings") or {})
+        counts = {eid: len(set(srcs) & siblings)
+                  for eid, srcs in (self._picker_scope.get("entity_sources") or {}).items()}
+        names = {d["id"]: panes.entity_name(self._entities, d["id"]) for d in self._entities}
+        return [(eid, names.get(eid) or panes.entity_name(self._entities, eid), tier)
+                for eid, tier in layer_speaker_menu(assigned, counts,
+                                                    self._recent_entities, names)]
+
+    def _assign_digits(self) -> List[Tuple[str, str, str]]:
+        return self._assign_menu()[:self.ASSIGN_DIGITS]
+
+    def _speaker_tiers(self) -> Dict[str, str]:
+        return {eid: tier for eid, _, tier in self._assign_menu()}
+
+    def _assign_context(self) -> str:
+        """The assign lane's context line: the digit slots grouped by tier
+        (source, then collection), the overflow count, and the search/mint
+        gesture — a cross-tier slot is visibly the collection's."""
+        menu = self._assign_menu()
+        digits = menu[:self.ASSIGN_DIGITS]
+        parts = []
+        src = [f"{i + 1}:{nm}" for i, (_, nm, t) in enumerate(digits) if t == "src"]
+        coll = [f"{i + 1}:{nm}" for i, (_, nm, t) in enumerate(digits) if t == "coll"]
+        if src:
+            parts.append("speakers: " + " · ".join(src))
+        if coll:
+            parts.append("collection: " + " · ".join(coll))
+        if len(menu) > len(digits):
+            parts.append(f"+{len(menu) - len(digits)} more")
+        if not parts:
+            parts.append("speakers: none yet")
+        return " │ ".join(parts) + " · A search/new"
+
+    @staticmethod
+    def _search_listing(matches: List[Tuple[str, str, str]]) -> str:
+        return " · ".join(f"{i + 1}:{nm} [{tier}]" for i, (_, nm, tier) in enumerate(matches))
+
+    def _assign_prompt(self, lead: str = "speaker") -> str:
+        digits = self._assign_digits()
+        listing = " · ".join(f"{i + 1}:{nm}" for i, (_, nm, _) in enumerate(digits))
+        return (f'{lead}: type to search the registry · #-or-Name · "? handle" = provisional'
+                + (f" · {listing}" if listing else ""))
+
+    def _on_editor_text_changed(self, text: str) -> None:
+        """Live narrowing for the assign editor (DEC 774dbe40 (4)): every
+        keystroke re-lists the registry matches, numbered and tier-tagged. A
+        bare digit keeps a pinned multi-match listing on screen (it picks
+        from it on Enter); any other text supersedes the pinned listing."""
+        if self._input_mode != "assign" or not self.editor.isVisible():
+            return
+        q = (text or "").strip()
+        if q and not q.isdigit():
+            self._assign_pinned = []
+        if self._assign_pinned and (not q or q.isdigit()):
+            self._editor_helper = ("pick: " + self._search_listing(self._assign_pinned)
+                                   + " · digit picks · keep typing = new search")
+        else:
+            self._assign_matches = match_speaker_query(
+                q, self._entities, self._speaker_tiers(), self._recent_entities,
+                limit=self.ASSIGN_DIGITS)
+            if self._assign_matches:
+                tail = (" · Enter picks it" if len(self._assign_matches) == 1
+                        else " · Enter = digit list")
+                self._editor_helper = (f"search '{q}': "
+                                       + self._search_listing(self._assign_matches) + tail)
+            elif q and not q.startswith("?"):
+                self._editor_helper = f"search '{q}': no match · Enter mints '{q}'"
+            else:
+                self._editor_helper = self._assign_prompt()
+        self._paint_frame()
 
     async def _do_assign_pick(self, n: int):
-        menu = self._assign_menu()
+        menu = self._assign_digits()
         if not (1 <= n <= len(menu)):
-            return {"status": f"assign: no speaker #{n} — A mints a new one"}
+            return {"status": f"assign: no speaker #{n} — A searches or mints"}
         self._active_entity = menu[n - 1][0]
-        return await self._do_commit_assign(menu[n - 1][0])
+        return await self._do_commit_assign(menu[n - 1][0], via=menu[n - 1][2])
 
     async def _do_assign_same(self):
         if self._active_entity is None:
@@ -1593,11 +1681,9 @@ class CorrectionWindow(QMainWindow):
         if entity:
             return await self._do_commit_accept(cluster, entity)
         self._accept_cluster = cluster
-        menu = self._assign_menu()
-        listing = " · ".join(f"{i + 1}:{nm}" for i, (_, nm) in enumerate(menu))
+        self._assign_pinned = []
         return {"editor": ("assign", ""),
-                "status": f'accept {cluster}: #-or-Name · "? handle" = provisional'
-                          + (f" · {listing}" if listing else "")}
+                "status": self._assign_prompt(f"accept {cluster}")}
 
     async def _do_commit_accept(self, cluster: str, entity_id: str):
         view = self.view
@@ -1626,35 +1712,82 @@ class CorrectionWindow(QMainWindow):
             journal_path=self._journal_path)
         view.assign_local(targets, entity_id, verdict, corr_id, cluster=cluster)
         self._active_entity = entity_id
+        self._note_recent(entity_id)
         return {"status": f"{verdict}: {cluster} → "
                           f"{panes.entity_name(self._entities, entity_id)}"
                           f" ({len(targets)} segments)"}
 
     def action_assign_new(self) -> None:
-        menu = self._assign_menu()
-        listing = " · ".join(f"{i + 1}:{nm}" for i, (_, nm) in enumerate(menu))
-        self._open_editor("assign", "",
-                          status='speaker: #-or-Name · "? handle" = provisional'
-                                 + (f" · {listing}" if listing else ""))
+        self._assign_pinned = []
+        self._open_editor("assign", "", status=self._assign_prompt())
+
+    def _note_recent(self, entity_id: str) -> None:
+        """Last-picked first (the sitting's memory; ranks tier 2 + search)."""
+        if entity_id in self._recent_entities:
+            self._recent_entities.remove(entity_id)
+        self._recent_entities.insert(0, entity_id)
+
+    def _pick_provenance(self, entity_id: str, via: Optional[str]) -> str:
+        """The readout tail naming where a pick came from (DEC 774dbe40 (5)):
+        a source-tier pick reads bare; a collection pick, a registry pick (with
+        the collections it was seen in) and a fresh mint are visibly so."""
+        if via == "coll":
+            return " (collection)"
+        if via == "new":
+            return " (new)"
+        if via == "reg":
+            seen = set()
+            src_cols = self._picker_scope.get("source_collections") or {}
+            for sid in (self._picker_scope.get("entity_sources") or {}).get(entity_id, []):
+                seen.update(src_cols.get(sid, []))
+            return (" (registry · seen in " + ", ".join(sorted(seen)) + ")") if seen \
+                else " (registry)"
+        return ""
 
     async def _do_submit_assign(self, raw: str):
         token = (raw or "").strip()
         if token.isdigit():
-            menu = self._assign_menu()
             n = int(token)
+            if self._assign_pinned:
+                listing, self._assign_pinned = self._assign_pinned, []
+                if not (1 <= n <= len(listing)):
+                    return {"status": f"assign: no match #{n} — the listing has {len(listing)}"}
+                eid, _, tier = listing[n - 1]
+                self._active_entity = eid
+                return await self._do_commit_assign(eid, via=tier)
+            menu = self._assign_digits()
             if not (1 <= n <= len(menu)):
                 return {"status": f"assign: no speaker #{n} — menu has {len(menu)}"}
             self._active_entity = menu[n - 1][0]
-            return await self._do_commit_assign(menu[n - 1][0])
+            return await self._do_commit_assign(menu[n - 1][0], via=menu[n - 1][2])
+        self._assign_pinned = []
         parsed = parse_entity_input(raw)
         if parsed is None:
             return {}
         name, provisional = parsed
+        tiers = self._speaker_tiers()
         for d in self._entities:
             p = d.get("properties") or {}
             if str(p.get("canonical_name") or "").lower() == name.lower():
                 self._active_entity = d["id"]
-                return await self._do_commit_assign(d["id"])
+                return await self._do_commit_assign(d["id"], via=tiers.get(d["id"], "reg"))
+        if not provisional:
+            # Typed search over the whole registry (DEC 774dbe40 (4)): one
+            # match commits, several pin a digit listing, none falls through
+            # to the mint. A distinct full name that shares a first name
+            # ("Mark Chen" beside Mark Saroufim) matches nothing and mints.
+            matches = match_speaker_query(name, self._entities, tiers,
+                                          self._recent_entities, limit=self.ASSIGN_DIGITS)
+            if len(matches) == 1:
+                eid, _, tier = matches[0]
+                self._active_entity = eid
+                return await self._do_commit_assign(eid, via=tier)
+            if len(matches) > 1:
+                self._assign_pinned = matches
+                return {"editor": ("assign", ""),
+                        "status": f"{len(matches)} matches for '{name}': "
+                                  + self._search_listing(matches)
+                                  + " · digit picks · keep typing = new search"}
         eid = await commit_speaker_entity(
             self.view.queue, self.view.graph_id, name, self.session_id,
             provisional=provisional, actor=self.actor,
@@ -1663,22 +1796,27 @@ class CorrectionWindow(QMainWindow):
             "canonical_name": name, "provisional": provisional,
             "kind": "person"}})
         self._active_entity = eid
-        return await self._do_commit_assign(eid)
+        return await self._do_commit_assign(eid, via="new")
 
-    async def _do_commit_assign(self, entity_id: str):
+    async def _do_commit_assign(self, entity_id: str, via: Optional[str] = None):
         if self._accept_cluster is not None:
             cluster, self._accept_cluster = self._accept_cluster, None
-            return await self._do_commit_accept(cluster, entity_id)
+            res = await self._do_commit_accept(cluster, entity_id)
+            if res.get("status", "").startswith(("accept", "cluster-merge")):
+                res["status"] += self._pick_provenance(entity_id, via)
+            return res
         seg = self.view.segments[self.cursor]
         corr_id = await commit_speaker_assign_correction(
             self.view.queue, self.view.graph_id, self.view.source_id,
             [seg.id], entity_id, self.session_id, verdict="name",
             actor=self.actor, journal_path=self._journal_path)
         self.view.assign_local([seg.id], entity_id, "name", corr_id)
+        self._note_recent(entity_id)
         idx = seg.index
         return {"advance": 1,
                 "status": f"@ #{idx} → "
-                          f"{panes.entity_name(self._entities, entity_id)}"}
+                          f"{panes.entity_name(self._entities, entity_id)}"
+                          + self._pick_provenance(entity_id, via)}
 
     # ---- propose lane ----------------------------------------------------
 

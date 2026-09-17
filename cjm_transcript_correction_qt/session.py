@@ -29,9 +29,11 @@ from cjm_transcript_correction_core.cli import (commit_wordless_transfer, load_c
                                                 plan_wordless_export, plan_wordless_transfer,
                                                 resolve_source_node, write_wordless_propset)
 from cjm_transcript_correction_core.graph import (list_source_spines, list_speaker_entities,
-                                                  session_purposes_by_source, start_session)
+                                                  session_purposes_by_source,
+                                                  speaker_assignment_sources, start_session)
 from cjm_transcript_correction_core.spine import list_sources, open_stack, source_status, SpineView
-from cjm_transcription_core.curation import collection_members, collection_order, list_collections
+from cjm_transcription_core.curation import (collection_members, collection_order,
+                                             list_collections, sibling_sources)
 
 
 class CorrectionShellSession(LoopThreadSession):
@@ -227,9 +229,43 @@ class CorrectionShellSession(LoopThreadSession):
                                    journal_path=journal_path, purpose=purpose,
                                    actor=actor)
         entities = await list_speaker_entities(view.queue, view.graph_id)
+        picker = await self._picker_scope(view, source_id)
         self.view = view
         self.session_id = sess.id
-        return {"view": view, "session_id": sess.id, "entities": entities}
+        return {"view": view, "session_id": sess.id, "entities": entities,
+                "picker": picker}
+
+    @staticmethod
+    def empty_picker_scope() -> Dict[str, Any]:
+        """The picker scope of an unfiled source (or a failed grouping read):
+        tier 1 only, the registry behind search."""
+        return {"collections": [], "siblings": {}, "entity_sources": {},
+                "source_collections": {}}
+
+    async def _picker_scope(self, view, source_id):
+        """The assign-lane picker's COLLECTION tier (DEC 774dbe40), resolved at
+        spine open through the transcription-core verbs — the direct --source
+        open never runs the browse ladder, so the source's grouping is read
+        here: the live collections holding it + their member siblings, where
+        every speaker Entity has been assigned (the sibling intersection is
+        the tier-2 recurrence count; the rest names the collections a
+        registry pick was seen in), and source -> collection titles for that
+        readout. Never blocks the open: any read failure = an unfiled source."""
+        try:
+            scope = await sibling_sources(self.queue, self.graph_capability, source_id)
+            entity_sources = await speaker_assignment_sources(view.queue, view.graph_id, None)
+            source_collections: Dict[str, List[str]] = {}
+            for c in await list_collections(self.queue, self.graph_capability):
+                if c.get("status") == "retired":
+                    continue
+                for sid, _ in await collection_members(self.queue, self.graph_capability,
+                                                       c["id"]):
+                    source_collections.setdefault(sid, []).append(c["title"])
+        except Exception:
+            return self.empty_picker_scope()
+        return {"collections": scope["collections"], "siblings": scope["siblings"],
+                "entity_sources": entity_sources,
+                "source_collections": source_collections}
 
     # ---- the respine seat (9af9793a: spine picker x / t) ------------------
 
