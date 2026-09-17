@@ -77,7 +77,8 @@ from cjm_transcript_correction_core.strata import (FILTER_LANE, pending_filter_p
                                                    select_span_segments)
 from cjm_transcript_correction_qt.escalation import (classify_refusal, cursor_for_time,
                                                      pending_matches, readout_from, refusal_line,
-                                                     resolve_decomp_core, respine_argv)
+                                                     resolve_decomp_core, respine_argv,
+                                                     spine_text_between)
 from cjm_transcript_correction_qt.event_payload import (event_items, event_payload_lines,
                                                         event_provenance, event_rows,
                                                         event_verdicts)
@@ -1334,7 +1335,11 @@ class CorrectionWindow(QMainWindow):
         ctx = await resolve_chunk_context(self.sess.queue, self._graph_cap, source_id=self.view.source_id,
                                           skeleton_selector=self.view.skeleton_hash, runs_dir=runs_dir,
                                           at_time=t)
-        r = render_chunk_prompt(ctx)
+        # The slots read the CORRECTED spine this app holds (finding c63cd2e3):
+        # manual fidelity edits + landed escalations, never the raw manifest
+        # draft, for the neighbours AND the chunk's own draft.
+        segments, pruned = list(self.view.segments), set(self.view.pruned_ids)
+        r = render_chunk_prompt(ctx, slot_text=lambda s, e: spine_text_between(segments, s, e, pruned))
         r["at_time"] = t
         return r
 
@@ -1356,9 +1361,12 @@ class CorrectionWindow(QMainWindow):
         else:
             where = "; audio not on disk"
         s, e = r["chunk_range"]
+        live = [k.split("_")[0] for k, v in (r.get("slot_sources") or {}).items() if v == "spine"]
+        slots = (f"; {'/'.join(live)} from the corrected spine" if live
+                 else "; slots from the manifest")
         self._paint_status(f"prompt copied for chunk {r['chunk']} ({s:.0f}-{e:.0f}s, {r['live_segments']} live "
-                           f"segments; template {r['prompt_hash'][:15]}…){where} — E again to import the "
-                           f"model's transcript")
+                           f"segments; template {r['prompt_hash'][:15]}…{slots}){where} — E again to import "
+                           f"the model's transcript")
 
     def _import_escalated_chunk(self, t: float) -> None:
         """Phase two: model id + paste -> the respine-chunk verb (a subprocess of

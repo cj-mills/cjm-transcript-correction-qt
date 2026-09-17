@@ -21,6 +21,31 @@ DECOMP_CORE_ENV = "cjm-transcript-decomp-core"      # Its conda env (env name = 
 CHUNK_TOLERANCE_S = 0.5  # A pending escalation still matches the cursor's chunk within this much of its bounds
 
 
+def spine_text_between(
+    segments: List[Any],       # The walked effective spine (SpineSegment-shaped: id/text/start_time)
+    start: float,              # Chunk span start (source seconds, inclusive)
+    end: float,                # Chunk span end (source seconds, exclusive)
+    pruned_ids: Any = (),      # Segment ids a prune correction targets (left out)
+) -> str:  # The corrected text over the span, segment texts space-joined; "" = nothing there
+    """The escalation prompt's LIVE slot text (finding c63cd2e3, user ruling
+    2026-09-17: BEFORE / AFTER / DRAFT read the corrected spine, the draft too —
+    a first chunk has no corrected neighbours to lean on, only its own draft).
+    A segment belongs to the span by its START time (the same time key the
+    ChunkRef join uses); timeless inserts have no place on the axis and stay
+    out; pruned segments are not text. Pure."""
+    pruned = set(pruned_ids or ())
+    parts: List[str] = []
+    for s in segments:
+        t = getattr(s, "start_time", None)
+        if t is None or s.id in pruned:
+            continue
+        if start <= float(t) < end:
+            txt = (getattr(s, "text", "") or "").strip()
+            if txt:
+                parts.append(txt)
+    return " ".join(parts)
+
+
 def resolve_decomp_core(
     envs_root: Optional[str] = None,  # Conda envs dir override (tests; None = derive from this interpreter)
 ) -> Optional[str]:  # Absolute executable path, or None
