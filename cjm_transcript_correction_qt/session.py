@@ -32,8 +32,8 @@ from cjm_transcript_correction_core.graph import (list_source_spines, list_speak
                                                   session_purposes_by_source,
                                                   speaker_assignment_sources, start_session)
 from cjm_transcript_correction_core.spine import list_sources, open_stack, source_status, SpineView
-from cjm_transcription_core.curation import (collection_members, collection_order,
-                                             list_collections, sibling_sources)
+from cjm_transcription_core.curation import (collection_members, collection_order, list_collections,
+                                             sibling_sources)
 
 
 class CorrectionShellSession(LoopThreadSession):
