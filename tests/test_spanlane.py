@@ -12,7 +12,7 @@ from cjm_transcript_correction_core.models import ANNOTATE_LANE_ACTIONS, ANNOTAT
 from cjm_transcript_correction_qt import app as app_module
 from cjm_transcript_correction_qt import panes
 from cjm_transcript_correction_qt.app import CorrectionWindow
-from cjm_transcript_correction_qt.spanlane import SpanLane
+from cjm_transcript_correction_qt.spanlane import label_consequence, SpanLane
 
 from test_panes import flat, make_state, make_view, seg
 
@@ -143,6 +143,34 @@ def test_payload_card_marks_the_span_and_flags_drift():
     text = "\n".join(flat(ln) for ln in f.payload_lines(view, f.proposals[0], width=96))
     assert "no longer on this line" in text and "⟦" not in text
     assert f.payload_lines(view, None) == []
+
+
+def test_card_names_overlapping_rows_and_what_accepting_does():
+    """Finding 67c4af17 + the user's keep-or-filter question: a same-label row
+    nested with the armed one is closed UNSEEN when either lands, so the card
+    names it; another label's overlapping row is named as staying pending (a
+    hidden tier-2 one says so); the head states what accepting DOES, read from
+    the clean read's own label tuples."""
+    view, f = spine(), lane()
+    f.proposals.append(_prop("p-so-um", "hesitation-marker", "s1", 0, 7, "So, um,", 1.0, index=1,
+                             origins=[{"proposer": "spans-w5-01"}]))
+    f.proposals.append(_prop("p-fs", "false-start", "s1", 4, 15, "um, the the", 1.4, tier=2, index=1))
+    um = f.proposals[0]
+    assert [q["proposal_id"] for q in f.overlapping(view, um)] == ["p-so-um", "p-fs"]
+    text = "\n".join(flat(ln) for ln in f.payload_lines(view, um, width=200))
+    assert "⚠ overlaps ?hesitation-marker “So, um,” (spans-w5-01) — SAME label" in text
+    assert "overlaps ??false-start “um, the the” [tier 2 hidden · t shows] — another label" in text
+    assert "accept → filtered from the clean read" in text
+    # once one of the nested pair lands, the other is closed and the note goes with it
+    view.overlays.append(_overlay("o1", "hesitation-marker", "s1", 4, 7, "um,", 1.4, "p-um"))
+    assert [q["proposal_id"] for q in f.overlapping(view, f.proposals[1])] == ["p-fs"]
+    # ... and a row of ANOTHER label over the accepted words names the overlay it would join
+    fs_card = "\n".join(flat(ln) for ln in f.payload_lines(view, f.proposals[-1], width=200))
+    assert "overlaps accepted ◈ hesitation-marker “um,” — both stand" in fs_card
+    assert label_consequence("word-repeat") == (
+        "→ filtered from the clean read, last unit survives", "yellow")
+    assert label_consequence("emphasis-repeat")[0].startswith("→ KEPT")
+    assert label_consequence("my-own-label")[1] == "green"    # only the filter labels subtract
 
 
 def test_verdicts_and_provenance():

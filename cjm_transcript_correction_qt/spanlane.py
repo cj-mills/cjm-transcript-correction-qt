@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_substrate_qt_kit.hitl import fmt_ts
+from cjm_transcript_correction_core.cleanread import (CLEAN_READ_FILTER_LABELS,
+                                                      CLEAN_READ_KEEP_LAST_UNIT)
 from cjm_transcript_correction_core.graph import load_extraction_gates
 from cjm_transcript_correction_core.spans import (bench_span_proposals, load_span_proposal_sets,
                                                   locate_span_tokens, pending_span_proposals,
@@ -103,15 +105,34 @@ class SpanLane:
                                                   show_tier2=self.show_tier2)
         return d["pending"]
 
+    def open_rows(self, view: Any) -> List[Dict[str, Any]]:
+        """Every not-yet-closed row, BOTH tiers — what an accept can close."""
+        d = self._derived(view)
+        if "open" not in d:
+            d["open"] = pending_span_proposals(self.proposals, view.overlays, show_tier2=True)
+        return d["open"]
+
     def hidden_tier2(self, view: Any) -> int:
         if self.show_tier2:
             return 0
-        d = self._derived(view)
-        if "hidden" not in d:
-            d["hidden"] = sum(1 for p in pending_span_proposals(self.proposals, view.overlays,
-                                                                show_tier2=True)
-                              if int(p.get("tier", 1)) == 2)
-        return d["hidden"]
+        return sum(1 for p in self.open_rows(view) if int(p.get("tier", 1)) == 2)
+
+    def overlapping(self, view: Any, p: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """The OTHER open rows whose words overlap `p`'s on its line (either
+        tier, line order). Finding 67c4af17: a same-label one is closed UNSEEN
+        the moment either lands, so the card names it and the human picks the
+        span knowingly; another label's row simply stays pending."""
+        a = p.get("anchor") or {}
+        cs, ce = int(a.get("char_start") or 0), int(a.get("char_end") or 0)
+        out = []
+        for q in self.open_rows(view):
+            b = q.get("anchor") or {}
+            if q is p or q.get("proposal_id") == p.get("proposal_id") \
+                    or b.get("segment_id") != a.get("segment_id"):
+                continue
+            if min(ce, int(b.get("char_end") or 0)) > max(cs, int(b.get("char_start") or 0)):
+                out.append(q)
+        return sorted(out, key=lambda q: int((q.get("anchor") or {}).get("char_start") or 0))
 
     def refresh_index(self, view: Any) -> None:
         """Rebuild the per-segment maps the cards paint from (once per frame)."""
@@ -260,6 +281,9 @@ class SpanLane:
                       ((f" · c={float(conf):.2f}" if isinstance(conf, (int, float)) else ""), "dim"),
                       (f" · id …{str(p.get('proposal_id') or '')[-8:]}", "dim")]
         lines: List[Line] = [head]
+        does, does_style = label_consequence(p.get("label"))
+        lines.append([("  accept ", "dim"), (does, does_style),
+                      (" · a digit relabels", "dim")])
         if p.get("rationale"):
             lines.extend(panes.wrap_spans([("Why: ", "dim"), (str(p["rationale"]), "")], width))
         origins = p.get("origins") or []
@@ -270,6 +294,35 @@ class SpanLane:
                         if isinstance(o.get("confidence"), (int, float)) else "")
                      for o in origins]
             lines.extend(panes.wrap_spans([("Origins: ", "dim"), (" · ".join(names), "dim")], width))
+        for q in self.overlapping(view, p):
+            qa = q.get("anchor") or {}
+            t2 = int(q.get("tier", 1)) == 2
+            who = ", ".join(str(o.get("proposer") or "?") for o in (q.get("origins") or [])[:2])
+            row = (f"{'??' if t2 else '?'}{q.get('label')} “{qa.get('text_snapshot')}”"
+                   + (f" ({who})" if who else "")
+                   + (" [tier 2 hidden · t shows]" if t2 and not self.show_tier2 else ""))
+            if q.get("label") == p.get("label"):
+                lines.extend(panes.wrap_spans(
+                    [("⚠ overlaps ", "yellow"), (row, "bold yellow"),
+                     (" — SAME label: accepting either row closes the other unseen. Take the "
+                      "span you mean (n steps to it, or h/l · v re-select).", "yellow")], width))
+            else:
+                lines.extend(panes.wrap_spans(
+                    [("overlaps ", "dim"), (row, "dim"),
+                     (" — another label, it stays pending", "dim")], width))
+        pa = p.get("anchor") or {}
+        for o in view.overlays_for(str(pa.get("segment_id"))):
+            op = o.get("payload") or {}
+            oa = op.get("anchor") or {}
+            if oa.get("char_start") is None or oa.get("char_end") is None:
+                continue
+            if min(int(pa.get("char_end") or 0), int(oa["char_end"])) \
+                    > max(int(pa.get("char_start") or 0), int(oa["char_start"])):
+                lines.extend(panes.wrap_spans(
+                    [("overlaps accepted ◈ ", "dim"),
+                     (f"{op.get('label')} “{op.get('text')}”", "cyan"),
+                     (" — both stand if this lands; the clean read merges overlapping cuts",
+                      "dim")], width))
         if pos is None:
             lines.append([("  (the proposal's segment is no longer on the current spine)", "yellow")])
             return lines
@@ -299,6 +352,19 @@ class SpanLane:
 
     def echo_gate(self, gate: Dict[str, Any]) -> None:
         self.gate = dict(gate)
+
+
+def label_consequence(label: Optional[str]) -> Tuple[str, str]:  # (text, style) for the card head
+    """What accepting under `label` DOES downstream — read from the clean
+    read's own label tuples, never restated (user question 2026-09-18: does
+    accepting an emphasis-repeat keep or filter?). Only the filter labels
+    subtract; every other label (the KEEP labels, a hand-typed one) records
+    the span and leaves its words in the text."""
+    if label in CLEAN_READ_KEEP_LAST_UNIT:
+        return "→ filtered from the clean read, last unit survives", "yellow"
+    if label in CLEAN_READ_FILTER_LABELS:
+        return "→ filtered from the clean read", "yellow"
+    return "→ KEPT in the clean read (the overlay records it)", "green"
 
 
 def gate_echo(gate_id: str, view: Any, status: str, watermark: Optional[float],

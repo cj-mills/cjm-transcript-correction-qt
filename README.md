@@ -99,6 +99,7 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 
 - `SpanLane` _class_ — The mode's state for ONE open spine: the span sets found for it (newest
 - `gate_echo` _function_ — The local echo of a span-lane watermark assertion.
+- `label_consequence` _function_ — What accepting under `label` DOES downstream — read from the clean
 - `load_span_lane` _function_ — Loop-side loader (the filter lane's mirror, format-gated to SPAN sets):
 
 ## Dependencies
