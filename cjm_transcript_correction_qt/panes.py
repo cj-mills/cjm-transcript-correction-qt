@@ -175,11 +175,19 @@ def annotate_body(s: Any, seg: Any) -> Line:
         if a.get("char_start") is not None and a.get("char_end") is not None:
             committed.append((int(a["char_start"]), int(a["char_end"])))
     sel = selection_range(s._word_cursor, s._word_anchor, len(toks))
+    # Proposal mode (d52d105f): the line's PENDING spans paint magenta (tier 2
+    # dim) under the committed cyan — the armed one is the yellow selection.
+    span = getattr(s, "_span", None)
+    pending = []
+    for p in ((span.pending_index.get(seg.id) or []) if span is not None else []):
+        a = p.get("anchor") or {}
+        pending.append((int(a.get("char_start") or 0), int(a.get("char_end") or 0),
+                        "dim magenta" if int(p.get("tier", 1)) == 2 else "magenta"))
     body: Line = []
     for i, (cs, ce, w) in enumerate(toks):
         if i:
             body.append((" ", ""))
-        style = ""
+        style = next((st for a, b, st in pending if cs >= a and ce <= b), "")
         if any(cs >= a and ce <= b for a, b in committed):
             style = "cyan"
         if sel is not None and sel[0] <= i <= sel[1]:
@@ -272,6 +280,13 @@ def card_lines(s: Any, pos: int, width: int) -> Tuple[List[Line], int]:
         body = chip + body
     elif s.lane == "annotate" and pos == s.cursor and seg.text:
         body = annotate_body(s, seg)
+    elif s.lane == "annotate" and getattr(s, "_span", None) is not None:
+        # Proposal mode: how many pending spans wait on an off-cursor line.
+        props = s._span.pending_index.get(seg.id) or []
+        if props:
+            t2 = all(int(p.get("tier", 1)) == 2 for p in props)
+            body = [(f"{'??' if t2 else '?'}{len(props)} ▏",
+                     "dim magenta" if t2 else "dim cyan")] + body
     # Open marks paint their CLASS on the card (a ⚑ alone cannot tell an attention-tier
     # class from a hand mark — user ask 2026-09-14); the cursor card adds each mark's
     # rationale as a dim line under the body, so the walk lane reads WHY it was flagged.
@@ -771,6 +786,17 @@ def status_chips(s: Any) -> List[Tuple[str, str]]:
         toks = segment_word_tokens(seg.text)
         sel = selection_range(s._word_cursor, s._word_anchor, len(toks))
         chips.append(("overlays", f"◈ {view.overlay_count}"))
+        span = getattr(s, "_span", None)
+        if span is not None and span.sets:
+            hidden = span.hidden_tier2(view)
+            wm = span.watermark
+            chips += [("proposals", f"spans {len(span.pending(view))} pending"
+                                    + (f" · tier2 {hidden} hidden" if hidden else "")),
+                      ("set", f"set …{span.set_id[-8:]}"
+                              + (f" ({span.set_index + 1}/{len(span.sets)})"
+                                 if len(span.sets) > 1 else "")),
+                      ("watermark", f"watermark {wm:.1f}s" if wm is not None
+                       else "watermark none")]
         if toks and sel is not None:
             a, b = sel
             readout = " ".join(t for _, _, t in toks[a:b + 1])
@@ -827,7 +853,7 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
                 e("replay", "r", "replay", "Audio"),
                 e("speed_up", "[/]", "speed", "Audio"),
                 e("yank", "y", "copy", "App"),
-                e("cycle_lane", "tab", "walk lane", "App"),
+                e("cycle_lane", "tab", "lane", "App"),
                 e("back", "B", "spine picker", "App"),
                 e("flywheel_page", "F", "flywheel", "App"),
                 e("quit_app", "q", "quit", "App")]
@@ -872,7 +898,16 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
                 e("flywheel_page", "F", "flywheel", "App"),
                 e("quit_app", "q", "quit", "App")]
     if s.lane == "annotate":
-        return [e("word_right", "h/l·←→", "word", "Words"),
+        span = getattr(s, "_span", None)
+        bound = span is not None and bool(span.sets)
+        mode = ([e("span_next", "n/N", "jump + arm span", "Proposals"),
+                 e("span_accept", "a", "accept span", "Proposals"),
+                 e("span_jump", "enter", "walk to row", "Proposals"),
+                 e("span_tier2", "t", "tier2 show/hide", "Proposals"),
+                 e("span_set", "S", "next set", "Proposals"),
+                 e("span_watermark", "W", "lane watermark", "Proposals")] if bound else [])
+        return mode + [
+                e("word_right", "h/l·←→", "word", "Words"),
                 e("word_select", "v", "range", "Words"),
                 e("annotate_quick", "space", "◈ commit", "Words"),
                 e("annotate_pick", "1-9", "class", "Words"),
@@ -880,7 +915,7 @@ def hint_entries(s: Any) -> List[Dict[str, str]]:
                 e("overlay_cycle", "o/O", "◈ pick", "Overlays"),
                 e("overlay_nudge", ",./<>", "◈ nudge", "Overlays"),
                 e("overlay_remove", "x", "◈ remove", "Overlays"),
-                e("next_overlay", "n/N", "◈ jump", "Overlays"),
+                e("next_overlay", "p/P" if bound else "n/N·p/P", "◈ jump", "Overlays"),
                 e("annotate_audition", "R", "audition", "Audio"),
                 e("replay", "r", "replay", "Audio"),
                 e("next", "j/k", "walk", "Walk"),
@@ -921,6 +956,9 @@ def default_pins(s: Any) -> List[str]:
         return ["next", "open_source", "quit_app"]
     if s.stage == "flywheel":
         return ["purpose_pick", "extract_dataset", "train_dataset"]
+    span = getattr(s, "_span", None)
+    if s.lane == "annotate" and span is not None and span.sets:
+        return ["span_next", "span_accept", "annotate_pick", "word_select", "cycle_lane"]
     return {"assign": ["assign_accept", "assign_pick", "assign_same",
                        "next", "cycle_lane"],
             "propose": ["propose_accept", "propose_next",

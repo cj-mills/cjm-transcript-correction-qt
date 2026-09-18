@@ -9,12 +9,14 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 - **`cjm_transcript_correction_qt.__init__`** — Qt shell for the transcript-correction workbench — a DIRECT PORT of
 - **`cjm_transcript_correction_qt.app`** — The Qt correction workbench: the same center-pinned segment walk, lane
 - **`cjm_transcript_correction_qt.cli`** — Console-script driver for the Qt shell: the SAME argument surface and
+- **`cjm_transcript_correction_qt.escalation`** — The correction app's chunk-escalation gesture (ruling 0b4d5cfa (6), work item
 - **`cjm_transcript_correction_qt.event_payload`** — The EVENT-SPAN payload of the kit HITL confirm component (55bcc3c5, the
 - **`cjm_transcript_correction_qt.filtering`** — The FILTER lane's state + pure builders (work item 55bcc3c5, the filtering
 - **`cjm_transcript_correction_qt.finetune_form`** — Modal finetune-launch form (DECs 48eff28b + 99280f79) on the kit
 - **`cjm_transcript_correction_qt.panes`** — Pure paint builders for the correction Qt shell — the Textual paint logic,
 - **`cjm_transcript_correction_qt.respine_dialog`** — Modal transfer dialog for the spine picker (work item 9af9793a — the
 - **`cjm_transcript_correction_qt.session`** — The correction shell's jobs seam: graph stack + JobQueue + the SpineView
+- **`cjm_transcript_correction_qt.spanlane`** — The ANNOTATE lane's proposal-driven MODE (DEC d52d105f, design bbf8bafd (h)):
 
 ## API
 
@@ -25,6 +27,17 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 ### `cjm_transcript_correction_qt.cli`
 
 - `main` _function_ — Resolve the shared launch surface, run the Qt correction window.
+
+### `cjm_transcript_correction_qt.escalation`
+
+- `classify_refusal` _function_ — DEPENDENTS = ask the operator to strand and re-run; OTHER = show it verbatim.
+- `cursor_for_time` _function_ — Where the reload lands (pure; 0b4d5cfa (6): the walk resumes where it stood).
+- `pending_matches` _function_ — Whether the pending escalation is the cursor's chunk (pure).
+- `readout_from` _function_ — The 'respined chunk …' line, else the last non-empty line.
+- `refusal_line` _function_
+- `resolve_decomp_core` _function_ — This env's bin first (the correction env installs decomp-core beside the
+- `respine_argv` _function_ — The verb's argv for the correction seat: --at-time from the cursor, the spine
+- `spine_text_between` _function_ — The escalation prompt's LIVE slot text (finding c63cd2e3, user ruling
 
 ### `cjm_transcript_correction_qt.event_payload`
 
@@ -82,6 +95,12 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 - `CorrectionShellSession` _class_ — The loop-thread seat for the correction shell.
 - `adapter_config_schema` _function_ — Host-side read of a task adapter's config schema from its REGISTRATION
 
+### `cjm_transcript_correction_qt.spanlane`
+
+- `SpanLane` _class_ — The mode's state for ONE open spine: the span sets found for it (newest
+- `gate_echo` _function_ — The local echo of a span-lane watermark assertion.
+- `load_span_lane` _function_ — Loop-side loader (the filter lane's mirror, format-gated to SPAN sets):
+
 ## Dependencies
 
-**Depends on:** `PySide6`, `cjm-substrate`, `cjm-substrate-qt-kit`, `cjm-transcript-correction-core`, `cjm-transcription-core`
+**Depends on:** `PySide6`, `cjm-substrate`, `cjm-substrate-qt-kit`, `cjm-transcript-correction-core`, `cjm-transcript-decomp-core`, `cjm-transcription-core`

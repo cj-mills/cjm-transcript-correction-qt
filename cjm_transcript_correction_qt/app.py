@@ -64,6 +64,7 @@ from cjm_transcript_correction_core.models import (ANNOTATE_LANE_ACTIONS, ANNOTA
                                                    RECOMMENDED_MARK_CLASSES,
                                                    RECOMMENDED_OVERLAY_LABELS,
                                                    RECOMMENDED_STRATUM_CLASSES, SPEEDS)
+from cjm_transcript_correction_core.spans import SPAN_LANE
 from cjm_transcript_correction_core.spine import (layer_speaker_menu, match_sources,
                                                   match_speaker_query, neighbor_word_bound,
                                                   parse_entity_input, parse_mark_input,
@@ -83,6 +84,7 @@ from cjm_transcript_correction_qt.event_payload import (event_items, event_paylo
                                                         event_provenance, event_rows,
                                                         event_verdicts)
 from cjm_transcript_correction_qt.filtering import FilterLane, load_filter_lane
+from cjm_transcript_correction_qt.spanlane import gate_echo, load_span_lane, SpanLane
 from cjm_transcription_core.chunk import DEFAULT_ESCALATION_MODEL_ID
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication
@@ -121,6 +123,7 @@ class CorrectionWindow(QMainWindow):
     transfer_planned = Signal(object)
     transfer_done = Signal(object)
     filter_loaded = Signal(object)   # the filter lane's sets/strata/gate read (55bcc3c5)
+    span_loaded = Signal(object)     # the annotate lane's span sets + gate read (d52d105f)
     prompt_ready = Signal(object)    # the E escalation prompt render (loop-side read, 0b4d5cfa (6))
     respine_done = Signal(object)    # the respine-chunk subprocess (worker thread) -> Qt thread
 
@@ -203,6 +206,7 @@ class CorrectionWindow(QMainWindow):
         self._input_mode = "edit"
         self._pending_proposal = None
         self._filter: Optional[FilterLane] = None   # the filter lane's state (None = no sets)
+        self._span: Optional[SpanLane] = None       # the annotate lane's proposal mode (None = hand lane alone)
         self._event_cursor = 0                       # the propose lane's worklist cursor
         self._tick_info = None
         self._tick_claim = -1        # the paint generation the ticker owns
@@ -265,6 +269,7 @@ class CorrectionWindow(QMainWindow):
         self.transfer_planned.connect(self._on_transfer_planned)
         self.transfer_done.connect(self._on_transfer_done)
         self.filter_loaded.connect(self._on_filter_loaded)
+        self.span_loaded.connect(self._on_span_loaded)
         self.prompt_ready.connect(self._on_prompt_ready)
         self.respine_done.connect(self._on_respine_done)
         self.sess = CorrectionShellSession(manifests_dir,
@@ -490,6 +495,8 @@ class CorrectionWindow(QMainWindow):
             return
         if self._filter_ready():
             self._filter.refresh_index(view)   # once per frame, not per card
+        if self._span_ready():
+            self._span.refresh_index(view)
         self._render_hitl()
         width, height = self._cells()
         self.cards.setHtml(panes.lines_to_html(
@@ -729,6 +736,19 @@ class CorrectionWindow(QMainWindow):
         # inhale sets); the read is loop-side and lands through filter_loaded.
         self._filter = None
         self._reload_filter_lane()
+        self._span = None
+        self._reload_span_lane()
+
+    def _reload_span_lane(self) -> None:
+        """Re-read the annotate lane's SPAN sets + gate for the open spine
+        (loop-side; lands through span_loaded) — the filter lane's mirror,
+        and the same re-check on lane entry with no set loaded."""
+        if self.view is None:
+            return
+        ws = resolve_workspace(explicit=None)
+        if ws is not None:
+            f = self.sess.submit(load_span_lane(self.view, str(ws.root)))
+            f.add_done_callback(self.span_loaded.emit)
 
     def _reload_filter_lane(self) -> None:
         """Re-read the filter lane's sets/strata/gate for the open spine
@@ -806,6 +826,16 @@ class CorrectionWindow(QMainWindow):
             add(str(d), "purpose_pick", lambda n=d: self.action_purpose_pick(n))
         add("n", "propose_next", lambda: self._jump_proposal(1))
         add("N", "propose_prev", lambda: self._jump_proposal(-1))
+        # The ANNOTATE lane's proposal mode (d52d105f): n/N walk the span
+        # worklist while a set is bound (the ◈ jump is theirs otherwise, and
+        # p/P always); a accepts, enter walks to the row, t/S/W as on filter.
+        add("n", "span_next", lambda: self._jump_span(1))
+        add("N", "span_prev", lambda: self._jump_span(-1))
+        add("a", "span_accept", self.action_span_accept)
+        add("enter", "span_jump", self.action_span_jump)
+        add("t", "span_tier2", self.action_span_tier2)
+        add("S", "span_set", self.action_span_set)
+        add("W", "span_watermark", self.action_span_watermark)
         add("n", "next_overlay",
             lambda: self._jump_glyph(1, self.view.overlay_ids, "◈ annotated"))
         add("N", "prev_overlay",
@@ -832,6 +862,10 @@ class CorrectionWindow(QMainWindow):
             lambda: self._jump_glyph(1, self.view.pruned_ids, "✂ pruned"))
         add("P", "prev_prune",
             lambda: self._jump_glyph(-1, self.view.pruned_ids, "✂ pruned"))
+        add("p", "next_overlay",
+            lambda: self._jump_glyph(1, self.view.overlay_ids, "◈ annotated"))
+        add("P", "prev_overlay",
+            lambda: self._jump_glyph(-1, self.view.overlay_ids, "◈ annotated"))
         add("W", "gate_editor", self.action_gate_editor)
         # The FILTER lane's confirm gestures (55bcc3c5): the headless
         # filter-confirm verbs, one key each; , . E = the span-edit gesture.
@@ -1117,6 +1151,11 @@ class CorrectionWindow(QMainWindow):
         self.cursor = new
         self._word_cursor, self._word_anchor = 0, None
         self._overlay_pick = None
+        if getattr(self, "_span", None) is not None:
+            # A walk step DISARMS (d52d105f build): the armed proposal's words were the
+            # selection this step just cleared — walking back must never leave a commit
+            # carrying the row over whatever word the cursor resets to.
+            self._span.armed_id = None
         now = time.monotonic()
         if now - self._state_saved > 1.0:
             save_tui_state(self._graph_db_path, self.view.source_id, new)
@@ -1521,6 +1560,8 @@ class CorrectionWindow(QMainWindow):
             self._submit_gesture(self._do_submit_filter_fix(value))
         elif mode == "filter_watermark":
             self._submit_gesture(self._do_submit_filter_watermark(value))
+        elif mode == "span_watermark":
+            self._submit_gesture(self._do_submit_span_watermark(value))
         elif mode == "annotate":
             self._submit_gesture(self._do_submit_annotate(value))
         else:
@@ -1566,13 +1607,18 @@ class CorrectionWindow(QMainWindow):
         # on it with no set loaded re-reads the workspace (a set ingested after
         # the spine opened appears without a relaunch); until the read lands
         # the lane reports "no filtering proposal set".
-        order = (["walk", "assign"]
-                 + (["propose"] if self.view.proposals_meta else [])
-                 + ["filter", "annotate"])
+        # LANE ORDER FOLLOWS THE WORKFLOW (user ruling d52d105f (3), f0b7f125
+        # (1)): propose -> walk -> assign -> filter -> annotate — events, the
+        # text walk, speakers, strata, then the overlay walk. Propose stays
+        # conditional on a proposal set existing; the opening lane stays walk.
+        order = ((["propose"] if self.view.proposals_meta else [])
+                 + ["walk", "assign", "filter", "annotate"])
         self.lane = order[(order.index(self.lane) + delta) % len(order)] \
             if self.lane in order else "walk"
         if self.lane == "filter" and not (self._filter is not None and self._filter.sets):
             self._reload_filter_lane()
+        if self.lane == "annotate" and not (self._span is not None and self._span.sets):
+            self._reload_span_lane()   # a span set ingested after the spine opened
         self._word_anchor = None
         self._overlay_pick = None
         save_tui_state(self._graph_db_path, self.view.source_id, None,
@@ -2472,6 +2518,8 @@ class CorrectionWindow(QMainWindow):
             return None
         if self._filter_ready():
             return "filter"
+        if self._span_ready():
+            return "annotate"
         if self.lane == "propose" and self.view.proposals_meta:
             return "propose"
         return None
@@ -2513,6 +2561,9 @@ class CorrectionWindow(QMainWindow):
         if which == "propose":
             self._render_event_hitl()
             return
+        if which == "annotate":
+            self._render_span_hitl()
+            return
         f, view = self._filter, self.view
         p = f.focus_row(view, self.cursor)   # cursor's proposal, else the walk's lookahead
         model = f.manifest.get("model") or {}
@@ -2526,6 +2577,23 @@ class CorrectionWindow(QMainWindow):
         self.hitl.worklist.set_items(f.items(view), cursor=f.cursor, header=header)
         self.hitl.worklist.set_payload(f.payload_lines(view, p, width=self._payload_width()))
         t1, t2, wm, extra = f.verdicts()
+        self.hitl.verdicts.set_verdicts(t1, t2, watermark=wm, extra=extra)
+        self.hitl.provenance.set_entries(f.provenance(self.actor, self.session_id))
+
+    def _render_span_hitl(self) -> None:
+        """The annotate lane's proposal mode on the same chrome: the pending
+        SPAN proposals as the worklist, the line with the span marked ⟦…⟧ as
+        the payload, verdicts derived from the view's live overlays."""
+        f, view = self._span, self.view
+        p = f.focus_row(view, self.cursor)   # armed row, else the cursor line's, else the lookahead
+        model = f.manifest.get("model") or {}
+        hidden = f.hidden_tier2(view)
+        header = (f"set …{f.set_id[-8:]} · {model.get('name') or '?'} · "
+                  f"{len(f.pending(view))} pending"
+                  + (f" · {hidden} tier-2 hidden (t)" if hidden else ""))
+        self.hitl.worklist.set_items(f.items(view), cursor=f.cursor, header=header)
+        self.hitl.worklist.set_payload(f.payload_lines(view, p, width=self._payload_width()))
+        t1, t2, wm, extra = f.verdicts(view)
         self.hitl.verdicts.set_verdicts(t1, t2, watermark=wm, extra=extra)
         self.hitl.provenance.set_entries(f.provenance(self.actor, self.session_id))
 
@@ -2559,6 +2627,13 @@ class CorrectionWindow(QMainWindow):
             self._event_cursor = i
             self.hitl.worklist.set_payload(self._event_payload())
             return
+        if which == "annotate":
+            rows = self._span.pending(self.view)
+            if 0 <= i < len(rows):   # a pick PREVIEWS the card; enter / double-click arms it
+                self._span.cursor = i
+                self.hitl.worklist.set_payload(
+                    self._span.payload_lines(self.view, rows[i], width=self._payload_width()))
+            return
         if which != "filter":
             return
         rows = self._filter.pending()
@@ -2581,6 +2656,12 @@ class CorrectionWindow(QMainWindow):
                     self._event_cursor = i
                     self._event_jump_to(pos, p)
                     return
+            return
+        if which == "annotate":
+            p = next((q for q in self._span.pending(self.view)
+                      if q.get("proposal_id") == key), None)
+            if p is not None:
+                self._span_arm(p)
             return
         if which != "filter":
             return
@@ -3081,16 +3162,21 @@ class CorrectionWindow(QMainWindow):
         rec, refusal = await self._snap_selection(seg)
         if rec is None:
             return {"status": refusal}
+        armed = self._span.armed(self.view, self.cursor) if self._span_ready() else None
+        tail = (" · space/1-9 commits" if armed is None else
+                f" · {'??' if int(armed.get('tier', 1)) == 2 else '?'}{armed.get('label')}"
+                " · a accepts · 1-9 relabels · h/l v re-select · n skips")
         return {"play": ("span", rec["start_time"], rec["end_time"],
-                         f" · ◈? “{rec['text'][:24]}” ({rec['snap']})"
-                         " · space/1-9 commits")}
+                         f" · ◈? “{rec['text'][:24]}” ({rec['snap']})" + tail)}
 
     def action_annotate_quick(self) -> None:
         if self._overlay_pick is not None:
             self._paint_status("annotate: ◈ pick live — o/O cycle · 1-9 jump "
                                "· esc returns to commit keys")
             return
-        self._submit_gesture(self._do_commit_overlay(self._overlay_label, None))
+        armed = self._span.armed(self.view, self.cursor) if self._span_ready() else None
+        self._submit_gesture(self._do_commit_overlay(
+            str(armed.get("label")) if armed is not None else self._overlay_label, None))
 
     def action_annotate_pick(self, n: int) -> None:
         if self._overlay_pick is not None:
@@ -3142,29 +3228,230 @@ class CorrectionWindow(QMainWindow):
         anchor = {"kind": "span", "segment_id": seg.id,
                   "char_start": rec["char_start"], "char_end": rec["char_end"],
                   "text_snapshot": rec["text"]}
+        # An ARMED proposal rides the commit (d52d105f): the hand gestures are
+        # the refinement gestures, so one commit path serves both sources and
+        # the verdict (accepted / edited / relabeled) derives from what landed.
+        armed = self._span.armed(view, self.cursor) if self._span_ready() else None
+        how = ""
+        if armed is not None:
+            snapshot = str((armed.get("anchor") or {}).get("text_snapshot") or "")
+            why = str(armed.get("rationale") or "")
+
+            def words(s: str) -> List[str]:
+                return [t.casefold() for _, _, t in segment_word_tokens(s)]
+            if label != str(armed.get("label")):
+                how = "relabeled"
+                carried = f"relabeled from {armed.get('label')} by {self.actor}: {why}".strip()
+            elif words(rec["text"]) != words(snapshot):
+                how = "edited"
+                carried = f"edited by {self.actor} from “{snapshot}”: {why}".strip()
+            else:
+                how, carried = "accepted", why
+            note = " · ".join(x for x in (note, carried) if x) or None
+        proposal_id = armed.get("proposal_id") if armed is not None else None
+        proposal_set_id = self._span.set_id if armed is not None else None
         try:
             overlay_id = await commit_speech_overlay_correction(
                 view.queue, view.graph_id, view.source_id, anchor, label,
                 rec["start_time"], rec["end_time"], rec["text"],
                 self.session_id, words=rec["words"], snap=rec["snap"],
-                actor=self.actor, note=note, journal_path=self._journal_path)
+                actor=self.actor, note=note, journal_path=self._journal_path,
+                proposal_id=proposal_id, proposal_set_id=proposal_set_id)
         except ValueError as e:
             return {"status": f"annotate refused: {e}"}
         view.add_overlay_local({"id": overlay_id, "correction_type": "annotation",
+                                "actor": self.actor,
                                 "payload": {"operation": "speech_overlay",
                                             "anchor": dict(anchor),
                                             "label": label,
                                             "start_time": rec["start_time"],
                                             "end_time": rec["end_time"],
                                             "text": rec["text"],
-                                            "snap": rec["snap"]}})
-        self._overlay_label = label
-        save_tui_state(self._graph_db_path, view.source_id, self.cursor,
-                       overlay_label=label)
+                                            "snap": rec["snap"],
+                                            "proposal_id": proposal_id,
+                                            "proposal_set_id": proposal_set_id}})
+        if armed is None:   # the sticky label is the HAND path's; a proposal never moves it
+            self._overlay_label = label
+            save_tui_state(self._graph_db_path, view.source_id, self.cursor,
+                           overlay_label=label)
         self._word_anchor = None
         self._overlay_pick = None
         return {"play": ("span", rec["start_time"], rec["end_time"],
-                         f" · ◈ {label} “{rec['text'][:24]}” ({rec['snap']})")}
+                         f" · ◈ {label} “{rec['text'][:24]}” ({rec['snap']})"
+                         + (f" · {how} ?…{str(proposal_id)[-8:]} · n next" if armed is not None
+                            else ""))}
+
+    # ---- annotate lane: the proposal-driven mode (d52d105f) --------------
+    # One lane, two sources. A jump ARMS a span proposal as the lane's own
+    # word selection, so the hand gestures above ARE the refinement gestures:
+    # a / space accept under the proposal's label, a digit relabels, h/l + v
+    # re-select before the commit (edited), x / ,.<> act on what landed. With
+    # no span set bound every verb here reports and the hand lane is unchanged
+    # — it stays load-bearing: the bench's MISSED are the hand overlays.
+
+    def _span_ready(self) -> bool:
+        return (self.lane == "annotate" and self._span is not None
+                and bool(self._span.sets))
+
+    def _on_span_loaded(self, fut) -> None:
+        try:
+            lane = fut.result()
+        except Exception as e:
+            self._paint_status(f"⚠ span sets: {e}")
+            return
+        if self.view is None:
+            return
+        self._span = lane
+        if lane is None or not lane.sets or self.lane != "annotate":
+            return   # no span set = the hand lane, silently
+        self._render()
+        self._paint_status(f"spans: {len(lane.pending(self.view))} pending in set "
+                           f"…{lane.set_id[-8:]} · n/N walk them · a accepts")
+
+    def _span_tier_hint(self) -> str:
+        return "" if self._span.show_tier2 else " · t shows the audition tier"
+
+    def _span_arm(self, p: Dict[str, Any]) -> None:
+        """Walk to a proposal and ARM it: its words become the word selection
+        on the CURRENT line (re-anchored by snapshot) and the snapped span
+        sounds. Words that left the line arm with no selection — the hand
+        selection is then the repair and the commit still carries the row."""
+        f, view = self._span, self.view
+        pos = f.position(view, p)
+        if pos is None:
+            self._render()
+            self._paint_status("the proposal's segment is no longer on the current spine")
+            return
+        self.cursor = pos
+        f.armed_id = p.get("proposal_id")
+        self._overlay_pick = None
+        rng = f.token_range(view, p)
+        if rng is None:
+            self._word_cursor, self._word_anchor = 0, None
+        else:
+            self._word_anchor, self._word_cursor = rng
+        self._render()
+        self._autoplay_timer.stop()
+        if self.player is not None:
+            self.player.stop()
+        if rng is None:
+            snapshot = (p.get("anchor") or {}).get("text_snapshot")
+            self._paint_status(f"?{p.get('label')} “{snapshot}” is no longer on this line — "
+                               "select the words by hand (h/l · v), a accepts as edited · n skips")
+            return
+        self._submit_gesture(self._do_annotate_audition())
+
+    def _jump_span(self, direction: int) -> None:
+        """n/N: the span worklist while a set is bound and rows are pending;
+        otherwise the hand lane's ◈ jump (p/P is that jump in both modes)."""
+        if not self._span_ready() or not self._span.pending(self.view):
+            self._jump_glyph(direction, self.view.overlay_ids, "◈ annotated")
+            return
+        p = self._span.step(self.view, self.cursor, direction)
+        if p is None:
+            self._paint_status("no more pending spans this way" + self._span_tier_hint())
+            return
+        self._span_arm(p)
+
+    def action_span_jump(self) -> None:
+        """enter: walk to (and arm) the worklist's highlighted row."""
+        if not self._span_ready():
+            self._paint_status("no span proposal set bound to this spine")
+            return
+        p = self._span.focus_row(self.view, self.cursor)
+        if p is None:
+            self._paint_status("no pending spans" + self._span_tier_hint())
+            return
+        self._span_arm(p)
+
+    def action_span_accept(self) -> None:
+        """a: accept the ARMED proposal — the ordinary overlay commit over the
+        current selection under the proposal's label. Unarmed on a line with
+        pending spans, the first press arms (selection + audition) and the
+        second accepts: a gesture never lands on words the human has not seen."""
+        if not self._span_ready():
+            self._paint_status("no span proposal set bound to this spine — "
+                               "space/1-9 commit by hand")
+            return
+        if self._overlay_pick is not None:
+            self._paint_status("annotate: ◈ pick live — o/O cycle · 1-9 jump "
+                               "· esc returns to commit keys")
+            return
+        f, view = self._span, self.view
+        p = f.armed(view, self.cursor)
+        if p is None:
+            here = f.at_segment(view, self.cursor)
+            if not here:
+                self._paint_status("no pending span on this segment · n/N jump to one"
+                                   + self._span_tier_hint())
+                return
+            self._span_arm(here[0])
+            return
+        self._submit_gesture(self._do_commit_overlay(str(p.get("label")), None))
+
+    def action_span_tier2(self) -> None:
+        if not self._span_ready():
+            self._paint_status("no span proposal set bound to this spine")
+            return
+        f = self._span
+        f.show_tier2 = not f.show_tier2
+        f.cursor = 0
+        self._render()
+        self._paint_status("audition tier shown (dim rows) · t hides"
+                           if f.show_tier2 else "audition tier hidden · t shows")
+
+    def action_span_set(self) -> None:
+        if not self._span_ready():
+            self._paint_status("no span proposal set bound to this spine")
+            return
+        f = self._span
+        if len(f.sets) < 2:
+            self._paint_status("one span set for this spine")
+            return
+        f.cycle_set(1)
+        self._word_anchor = None
+        self._render()
+        self._paint_status(f"set {f.set_index + 1}/{len(f.sets)}: …{f.set_id[-8:]}")
+
+    def action_span_watermark(self) -> None:
+        if not self._span_ready():
+            self._paint_status("no span proposal set bound to this spine")
+            return
+        wm = self._span.watermark
+        self._open_editor("span_watermark", "here",
+                          status="span-lane watermark: here · end · none · <sec> (an unmatched "
+                                 "proposal below it derives as rejected) · enter · esc"
+                                 + (f" · now {wm:.1f}s" if wm is not None else " · now none"))
+
+    async def _do_submit_span_watermark(self, raw: str):
+        f, view = self._span, self.view
+        arg = raw.strip().lower()
+        wm: Optional[float]
+        if arg == "end":
+            ends = [float(s.end_time) for s in view.segments if s.end_time is not None]
+            if not ends:
+                return {"status": "watermark end: the spine has no timed segments"}
+            wm = max(ends)
+        elif arg == "here":
+            seg = view.segments[self.cursor]
+            if seg.end_time is None:
+                return {"status": "watermark here: the cursor segment has no time"}
+            wm = float(seg.end_time)
+        elif arg == "none":
+            wm = None
+        else:
+            try:
+                wm = float(arg)
+            except ValueError:
+                return {"status": "watermark: here · end · none · <sec> (refused)"}
+        status = str((f.gate or {}).get("extraction_status") or "in_progress")
+        gid = await commit_extraction_gate(
+            view.queue, view.graph_id, view.source_id, view.skeleton_hash, status, wm,
+            session_id=self.session_id, actor=self.actor, journal_path=self._journal_path,
+            lane=SPAN_LANE)
+        f.echo_gate(gate_echo(gid, view, status, wm, self.actor))
+        return {"status": f"⛭ span-lane watermark: annotated_through "
+                          f"{('%.1fs' % wm) if wm is not None else 'none'} ({str(gid)[:8]})"}
 
     def _overlay_at_cursor(self, seg,
                            covering_only: bool = False) -> Optional[Dict[str, Any]]:
@@ -3256,7 +3543,8 @@ class CorrectionWindow(QMainWindow):
             str(p.get("label")), new_start, new_end, str(p.get("text") or ""),
             self.session_id, words=list(p.get("words") or []), snap="nudged",
             supersedes_id=target["id"], actor=self.actor,
-            journal_path=self._journal_path)
+            journal_path=self._journal_path,
+            proposal_id=p.get("proposal_id"), proposal_set_id=p.get("proposal_set_id"))
         view.remove_overlay_local(target["id"])
         view.add_overlay_local({"id": overlay_id, "correction_type": "annotation",
                                 "payload": {**p, "anchor": anchor,
@@ -3467,6 +3755,7 @@ class CorrectionWindow(QMainWindow):
         self._marks = {}
         self._pending_proposal = None
         self._filter = None
+        self._span = None
         self._event_cursor = 0
         hitl = getattr(self, "hitl", None)   # the unbound-method tests host no widgets
         if hitl is not None:
@@ -3842,6 +4131,8 @@ class CorrectionWindow(QMainWindow):
             self._render()
         elif self._word_anchor is not None:
             self._word_anchor = None
+            if self._span is not None:
+                self._span.armed_id = None   # esc disarms: the next commit is a hand commit
             self._render()
         elif self._overlay_pick is not None:
             self._overlay_pick = None
