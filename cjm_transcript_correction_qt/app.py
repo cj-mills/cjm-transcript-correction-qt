@@ -3274,6 +3274,11 @@ class CorrectionWindow(QMainWindow):
             self._overlay_label = label
             save_tui_state(self._graph_db_path, view.source_id, self.cursor,
                            overlay_label=label)
+        else:
+            # A landed commit DISARMS: the selection collapses below, and a stale arm
+            # let x -> a re-commit the row over the lone cursor word (user-hit
+            # 2026-09-18: 'I guess' re-landed as 'guess' one second after the x).
+            self._span.armed_id = None
         self._word_anchor = None
         self._overlay_pick = None
         return {"play": ("span", rec["start_time"], rec["end_time"],
@@ -3568,6 +3573,8 @@ class CorrectionWindow(QMainWindow):
         view.remove_overlay_local(target["id"])
         if self._overlay_pick == target["id"]:
             self._overlay_pick = None
+        if getattr(self, "_span", None) is not None:
+            self._span.armed_id = None   # the re-opened row must be ARMED afresh (selection + audition)
         p = target.get("payload") or {}
         return {"status": f"⊘ removed ◈ [{p.get('label')}] "
                           f"“{str(p.get('text') or '')[:24]}”"}

@@ -282,6 +282,18 @@ def test_an_armed_commit_carries_the_proposal_and_leaves_the_sticky_label(monkey
     assert view.overlays[-1]["payload"]["proposal_id"] == "p-um"
     assert [p["proposal_id"] for p in f.pending(view)] == ["p-the", "p-uh"]
     assert "accepted" in out["play"][3]
+    # A landed commit DISARMS (user-hit 2026-09-18): x re-opens the row, and a stale arm
+    # would let the next a commit the lone cursor word — it must ARM afresh instead.
+    assert f.armed_id is None
+    view.overlays.pop()                                       # x: the row is pending again
+    assert f.armed(view, 1) is None
+    armed_calls = []
+    s.action_span_accept = None
+    s._paint_status = lambda *a, **k: None
+    s._span_arm = armed_calls.append
+    s._submit_gesture = lambda coro: (_ for _ in ()).throw(AssertionError("must not commit unarmed"))
+    CorrectionWindow.action_span_accept(s)
+    assert [p["proposal_id"] for p in armed_calls] == ["p-um"]   # first a arms; only the second accepts
     # Relabel: another label while armed carries the proposal with the relabel note.
     view2, f2 = spine(), lane()
     view2.queue = view2.graph_id = None
@@ -318,6 +330,26 @@ def test_a_walk_step_disarms(monkeypatch):
     CorrectionWindow._move(s, -1)
     assert s.cursor == 1 and s._word_anchor is None
     assert f.armed_id is None and f.armed(view, 1) is None
+
+
+def test_removing_an_overlay_disarms(monkeypatch):
+    """x re-opens the removed overlay's proposal; whatever was armed before must
+    not ride the next commit — the re-opened row is armed afresh by n or a."""
+    async def fake_removal(*a, **k):
+        return "rm-1"
+    monkeypatch.setattr(app_module, "commit_speech_overlay_removal", fake_removal)
+    view, f = spine([_overlay("o1", "hesitation-marker", "s1", 4, 7, "um,", 1.4, "p-um")]), lane()
+    view.queue = view.graph_id = None
+    view.remove_overlay_local = lambda oid: view.overlays.remove(
+        next(o for o in view.overlays if o["id"] == oid))
+    f.armed_id = "p-um"
+    s = SimpleNamespace(view=view, cursor=1, _span=f, _overlay_pick=None, session_id="sess",
+                        actor="human", _journal_path=None,
+                        _overlay_at_cursor=lambda seg: view.overlays[0])
+    out = asyncio.run(CorrectionWindow._do_overlay_remove(s))
+    assert "removed" in out["status"] and view.overlays == []
+    assert f.armed_id is None
+    assert [p["proposal_id"] for p in f.pending(view)][0] == "p-um"   # re-opened, unarmed
 
 
 def test_cards_chips_and_hints_in_proposal_mode():
