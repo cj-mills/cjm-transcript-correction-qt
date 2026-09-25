@@ -1,5 +1,5 @@
 """Modal finetune-launch form (DECs 48eff28b + 99280f79) on the kit
-FormShell (d55292f9): the tui-kit ConfigForm model owns semantics
+FormShell (d55292f9): the kit ConfigForm model owns semantics
 (cycle/parse/overrides); the shell owns the chrome — a FIXED header (title
 + mouse close, 140a7b3c) and FIXED footer (hints + errors) around NATIVE
 clickable rows (kit PickerList) with ensure-visible keyboard follow, and
@@ -13,10 +13,10 @@ on_launch — the CALLER submits the task and closes the dialog."""
 import html as _html
 from typing import Any, Callable, Dict, List, Optional
 
+from cjm_substrate_qt_kit.configform import ConfigForm
 from cjm_substrate_qt_kit.formdialog import FormShell
 from cjm_substrate_qt_kit.keyhints import keycaps
 from cjm_substrate_qt_kit.theme import current_theme
-from cjm_substrate_tui_kit.form import ConfigForm
 from PySide6.QtCore import Qt
 
 
