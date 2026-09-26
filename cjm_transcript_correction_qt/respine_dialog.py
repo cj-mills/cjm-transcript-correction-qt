@@ -158,15 +158,11 @@ class TransferDialog(QDialog):
 
     def _render(self) -> None:
         theme = current_theme()
-        chrome = ("background: %s; border: 1px solid %s; padding: 6px;"
-                  % (theme["surface"], theme["border"]))
-        self.head.setStyleSheet("QTextBrowser { %s }" % chrome)
-        self.list.setStyleSheet("QListWidget { %s }" % chrome)
-        self.body.setStyleSheet("QTextBrowser { %s }" % chrome)
-        self.foot.setStyleSheet("QLabel { %s color: %s; }"
-                                % (chrome, theme["content-dim"]))
+        # Chrome comes from the design system's stylesheet (token schema v1);
+        # the footer paints through the state channel.
+        self.foot.setProperty("role", "dim")
         e = _html.escape
-        dim = theme["content-dim"]
+        dim = theme["dim"]
         donor, target = self._labels()
         pick = self.phase == "pick"
         self.list.setVisible(pick)
@@ -210,7 +206,7 @@ class TransferDialog(QDialog):
             foot = "<span style='color:%s'>%s</span> · %s" % (theme["accent"],
                                                               e(self._note), foot)
         self.head.setHtml("<div style='color:%s'>%s</div>"
-                          % (theme["content"], modal_header(title, theme)))
+                          % (theme["text"], modal_header(title, theme)))
         self.foot.setText(foot)
 
     def _resize(self) -> None:

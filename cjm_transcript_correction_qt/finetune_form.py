@@ -162,11 +162,11 @@ class FinetuneFormDialog(FormShell):
         counts = self.dataset.get("counts") or {}
         title = ("FINETUNE — %s<span style='color:%s'> · %s examples</span>"
                  % (e(str(self.dataset.get("dataset_id") or "?")),
-                    theme["content-dim"], counts.get("examples", 0)))
+                    theme["dim"], counts.get("examples", 0)))
         if self.adopt_label:
             title += ("<span style='color:%s'> · recipe from %s — ● rows "
                       "are its diff from defaults</span>"
-                      % (theme["content-dim"], e(self.adopt_label)))
+                      % (theme["dim"], e(self.adopt_label)))
         self.set_header(title)
         rows: List[Dict[str, Any]] = []
         fields = self._fields()
