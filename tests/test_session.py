@@ -9,7 +9,6 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-
 from cjm_transcript_correction_qt.session import CorrectionShellSession
 
 

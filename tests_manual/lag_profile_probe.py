@@ -7,6 +7,7 @@ gesture that commits is submitted.
 Run from the transcription-core workspace:
   QT_QPA_PLATFORM=offscreen python tests_manual/lag_profile_probe.py "<source substring>" <skeleton-prefix> [lane]
 """
+
 import cProfile
 import os
 import pstats

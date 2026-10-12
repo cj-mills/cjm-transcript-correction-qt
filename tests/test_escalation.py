@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 from cjm_transcript_correction_qt import panes
 from cjm_transcript_correction_qt.app import CorrectionWindow
-from cjm_transcript_correction_qt.escalation import (classify_refusal, cursor_for_time, pending_matches,
-                                                     readout_from, refusal_line, resolve_decomp_core,
-                                                     respine_argv)
+from cjm_transcript_correction_qt.escalation import (classify_refusal, cursor_for_time,
+                                                     pending_matches, readout_from, refusal_line,
+                                                     resolve_decomp_core, respine_argv)
 
 
 class KeyTableHost:

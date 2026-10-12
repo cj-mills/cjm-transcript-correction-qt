@@ -5,6 +5,7 @@ searches the whole registry (one match commits, several pin a digit listing,
 none mints), and the session resolves the collection scope at spine open
 without blocking on it. Unbound methods over SimpleNamespace hosts (the
 test_navigation strategy) — no QApplication for the gesture logic."""
+
 import asyncio
 from types import SimpleNamespace
 

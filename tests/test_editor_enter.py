@@ -14,6 +14,7 @@ offscreen and delegate the Return/Enter branch to the app's unbound
 eventFilter, so the guarded behaviour is the app's, not a copy. (Only that
 branch is delegated: the app filter's fall-through is the QMainWindow super
 call, which a stub host cannot satisfy.)"""
+
 import os
 import sys
 from types import SimpleNamespace

@@ -5,6 +5,7 @@ order, dump what the panel paints, arm a few proposals (n / enter) and time the
 per-gesture frame on the full set. Reads only — NO commit gesture is submitted
 (the walk is the human's). Run from anywhere:
 QT_QPA_PLATFORM=offscreen python tests_manual/live_span_probe.py ["<source>" <skeleton-prefix>]"""
+
 import os
 import sys
 import time

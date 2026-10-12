@@ -1,6 +1,7 @@
 """The E gesture's LIVE slot text (finding c63cd2e3): the corrected spine over a
 chunk's span, by segment START time — inserts with a time ride along, timeless ones
 and pruned segments stay out — and the readout names which slots came from it."""
+
 from types import SimpleNamespace
 
 from cjm_transcript_correction_qt.app import CorrectionWindow

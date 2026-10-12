@@ -9,8 +9,7 @@ import asyncio
 from types import SimpleNamespace
 
 from cjm_transcript_correction_core.models import ANNOTATE_LANE_ACTIONS, ANNOTATE_ONLY_ACTIONS
-from cjm_transcript_correction_qt import app as app_module
-from cjm_transcript_correction_qt import panes
+from cjm_transcript_correction_qt import app as app_module, panes
 from cjm_transcript_correction_qt.app import CorrectionWindow
 from cjm_transcript_correction_qt.spanlane import label_consequence, SpanLane
 

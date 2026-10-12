@@ -5,7 +5,6 @@ data, and default pins project a compact hint line."""
 from types import SimpleNamespace
 
 from cjm_substrate_qt_kit.keyhints import hint_line
-
 from cjm_transcript_correction_qt import panes
 
 from test_panes import make_state, make_view, seg

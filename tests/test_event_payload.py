@@ -5,9 +5,8 @@ the a-gesture takes, and the strip / provenance derive from the view's
 proposal metadata."""
 
 from cjm_transcript_correction_qt.event_payload import (accept_shape, event_items,
-                                                        event_payload_lines,
-                                                        event_provenance, event_rows,
-                                                        event_verdicts)
+                                                        event_payload_lines, event_provenance,
+                                                        event_rows, event_verdicts)
 
 from test_panes import make_view, seg
 

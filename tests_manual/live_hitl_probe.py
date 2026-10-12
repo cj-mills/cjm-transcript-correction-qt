@@ -4,6 +4,7 @@ path), wait for the filter lane to load, dump what the panel paints on the filte
 lane and the propose lane, jump once on each. Reads only — no gesture is submitted.
 Run from the transcription-core workspace: QT_QPA_PLATFORM=offscreen python
 tests_manual/live_hitl_probe.py ["<source substring>" <skeleton-prefix>]"""
+
 import os
 import sys
 import time
