@@ -23,8 +23,10 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from cjm_context_graph_layer.ops import store_covariates
 from cjm_substrate.core.manager import CapabilityManager
-from cjm_substrate_qt_kit.loopthread import LoopThreadSession
+from cjm_substrate_qt_kit.gesturebench import ladder
+from cjm_substrate_qt_kit.loopthread import coro_name, LoopThreadSession
 from cjm_transcript_correction_core.cli import (commit_wordless_transfer, load_capabilities,
                                                 plan_wordless_export, plan_wordless_transfer,
                                                 resolve_source_node, write_wordless_propset)
@@ -42,11 +44,14 @@ class CorrectionShellSession(LoopThreadSession):
     start() spins the loop (kit LoopThreadSession); open_stack() bootstraps
     the graph capability + JobQueue and resolves the effective db;
     discovery verbs feed the pickers; open_spine() re-points the SpineView
-    seat, mints the graph CorrectionSession, and loads the speaker registry —
-    one Future each. close() runs on_close() on the loop (seat/queue
-    teardown), then stops the thread. One instance per window."""
+    seat, mints the graph CorrectionSession, and loads the speaker registry —    one Future each. close() runs on_close() on the loop (seat/queue
+    teardown), then stops the thread. One instance per window. Every verb and
+    serialized gesture is a measured gesture (the kit's seam, design detail
+    4389a579) in the transcript graph's timings ledger, named once the stack
+    resolves the db."""
 
     thread_name = "correction-session"
+    app = "correction"
 
     def __init__(self, manifests_dir: str,   # Capability manifests directory
                  *, graph_capability: str = "cjm-capability-graph-sqlite",
@@ -77,7 +82,7 @@ class CorrectionShellSession(LoopThreadSession):
         but the donor's Textual message queue ran each action handler to
         completion before dispatching the next key — the commit-then-echo
         consistency every gesture assumes. The lock restores exactly that."""
-        return self.submit(self._serial(coro))
+        return self.submit(self._serial(coro), gesture=coro_name(coro))
 
     async def _serial(self, coro):
         if self._gesture_lock is None:
@@ -103,7 +108,13 @@ class CorrectionShellSession(LoopThreadSession):
             # exit must resolve the Future, never kill the loop thread.
             raise RuntimeError(str(e) or "capability load failed") from e
         self.db = str(db)
+        await self.measure_into(self.db)
         return {"db": self.db}
+
+    async def measure_covariates(self) -> Optional[Dict[str, Any]]:
+        """The store's growth covariates beside the gestures (design detail 4389a579): the
+        layer's store half -- the gestures read no journal history."""
+        return await store_covariates(self.queue, self.graph_capability)
 
     def list_sources(self) -> Future:
         """The graph's Source nodes — the discovery corpus (2ce81638)."""
@@ -344,6 +355,41 @@ class CorrectionShellSession(LoopThreadSession):
         self.view = None
         self.queue = None
         self.manager = None
+
+
+def bench_gestures(
+    params: Dict[str, Any],  # db, manifests_dir, journals; optionally the lane's source
+) -> List[str]:  # The gestures run, in order
+    """The correction shell's canonical gestures for the scale harness (design detail 4389a579):
+    its open ladder on one graph -- the stack, the source list, one source's spine (the seat a
+    sitting opens: it mints the CorrectionSession every commit stamps, journaled into the
+    graph's own writes journal), the picker's status pass over every source -- each measured by
+    the session's own seam. The source is the lane's `source`, else the first by id."""
+    journals = params.get("journals") or {}
+    s = CorrectionShellSession(params["manifests_dir"],
+                               timeout=float(params.get("timeout_s", 3600)))
+    found: Dict[str, Any] = {"sources": []}
+
+    def wait(fut):
+        return fut.result(s.timeout)
+
+    def sources():
+        found["sources"] = sorted(wait(s.list_sources()))
+
+    def spine():
+        sid = params.get("source") or found["sources"][0][0]
+        wait(s.open_spine(sid, dict(found["sources"]).get(sid, ""), rendition=None,
+                          skeleton=None, journal_path=journals.get("writes"), purpose=None,
+                          actor="bench:harness"))
+
+    s.start()
+    try:
+        return ladder([("open_stack", lambda: wait(s.open_stack(params["db"]))),
+                       ("list_sources", sources),
+                       ("open_spine", spine),
+                       ("statuses", lambda: wait(s.statuses([i for i, _ in found["sources"]])))])
+    finally:
+        s.close()
 
 
 def adapter_config_schema(manifests_dir: str,  # Capability manifests directory

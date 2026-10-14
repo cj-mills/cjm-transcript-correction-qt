@@ -94,6 +94,7 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 
 - `CorrectionShellSession` _class_ — The loop-thread seat for the correction shell.
 - `adapter_config_schema` _function_ — Host-side read of a task adapter's config schema from its REGISTRATION
+- `bench_gestures` _function_ — The correction shell's canonical gestures for the scale harness (design detail 4389a579):
 
 ### `cjm_transcript_correction_qt.spanlane`
 
@@ -104,4 +105,4 @@ Qt shell for the transcript-correction workbench — the third workflow TUI migr
 
 ## Dependencies
 
-**Depends on:** `PySide6`, `cjm-substrate`, `cjm-substrate-qt-kit`, `cjm-transcript-correction-core`, `cjm-transcript-decomp-core`, `cjm-transcription-core`
+**Depends on:** `PySide6`, `cjm-context-graph-layer`, `cjm-substrate`, `cjm-substrate-qt-kit`, `cjm-transcript-correction-core`, `cjm-transcript-decomp-core`, `cjm-transcription-core`
