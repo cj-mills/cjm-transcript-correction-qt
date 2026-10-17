@@ -23,6 +23,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from cjm_context_graph_layer.journal import sidecar_journal_path, write_window
 from cjm_context_graph_layer.ops import store_covariates
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate_qt_kit.gesturebench import ladder
@@ -81,14 +82,26 @@ class CorrectionShellSession(LoopThreadSession):
         next runs. Bare submit() interleaves at await points (asyncio tasks),
         but the donor's Textual message queue ran each action handler to
         completion before dispatching the next key — the commit-then-echo
-        consistency every gesture assumes. The lock restores exactly that."""
+        consistency every gesture assumes. The lock restores exactly that.
+
+        Every serialized gesture is a commit gesture, and each runs inside ONE
+        atomic unit on the graph's journal (ruling 3de795e4): the family's
+        writer -- lock, heal -- with every core commit's own window joined, so
+        the gesture's ops land at its close, appended whole, then applied; a
+        crash leaves all of them or none. The unit opens the writer, never the
+        op clock: each core commit keeps its own time (correction orders marks
+        and rows by ts). Its plans read the db as the gesture opened -- a
+        gesture's echo is the SpineView's own, never a read back."""
         return self.submit(self._serial(coro), gesture=coro_name(coro))
 
     async def _serial(self, coro):
         if self._gesture_lock is None:
             self._gesture_lock = asyncio.Lock()
         async with self._gesture_lock:
-            return await coro
+            async with write_window(self.queue, self.graph_capability,
+                                    sidecar_journal_path(self.db) if self.db else None,
+                                    what=coro_name(coro), unit=True):
+                return await coro
 
     # ---- the open ladder -------------------------------------------------
 

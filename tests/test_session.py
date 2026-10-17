@@ -108,9 +108,16 @@ def test_open_spine_mints_session_and_registry(monkeypatch):
         sess.close()
 
 
-def test_submitted_coroutines_serialize_in_order():
+def _seat_on(sess, tmp_path):  # The session over an in-memory store, as an opened stack leaves it
+    from cjm_context_graph_layer.testing import MemGraph
+    sess.queue, sess.db = MemGraph(), str(tmp_path / "graph.db")
+    return sess.queue
+
+
+def test_submitted_coroutines_serialize_in_order(tmp_path):
     sess, _ = make_session()
     sess.start()
+    _seat_on(sess, tmp_path)
     try:
         order = []
 
@@ -183,5 +190,39 @@ def test_statuses_batches_status_and_purposes(monkeypatch):
         res = sess.statuses(["src-1", "src-2"]).result(5)
         assert res["status"]["src-2"]["segments"] == 3
         assert res["purposes"]["src-1"]["genuine"] == 2
+    finally:
+        sess.close()
+
+
+def test_a_gesture_is_one_atomic_unit_on_the_journal(tmp_path):
+    """Ruling 3de795e4: a gesture's commits land at its close as ONE unit -- appended whole, then
+    applied -- each core commit's own window joined; a failing gesture lands nothing."""
+    from cjm_context_graph_layer.journal import sidecar_journal_path
+    from cjm_context_graph_primitives.journal import read_journal
+    from cjm_transcript_correction_core.graph import commit_speaker_entity, start_session
+
+    sess, _ = make_session()
+    sess.start()
+    store = _seat_on(sess, tmp_path)
+    j = sidecar_journal_path(sess.db)
+    try:
+        async def two_commits():
+            s = await start_session(store, sess.graph_capability, ["src-1"], journal_path=j)
+            await commit_speaker_entity(store, sess.graph_capability, "Ada", s.id, journal_path=j)
+            assert read_journal(j) == []  # buffered until the gesture closes
+            return s.id
+
+        sid = sess.run_serial(two_commits()).result(5)
+        recs = read_journal(j)
+        assert [r["verb"] for r in recs] == ["session-start", "speaker-entity"]
+        assert len({r["unit"] for r in recs}) == 1 and sid in store.nodes
+
+        async def failing():
+            await start_session(store, sess.graph_capability, ["src-1"], journal_path=j)
+            raise RuntimeError("the gesture failed after its commit")
+
+        with pytest.raises(RuntimeError):
+            sess.run_serial(failing()).result(5)
+        assert len(read_journal(j)) == 2  # the failed gesture landed nothing
     finally:
         sess.close()

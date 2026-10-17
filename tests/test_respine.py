@@ -240,7 +240,7 @@ def test_export_requires_workspace_and_reports(monkeypatch):
     assert calls[-1] == "⚠ export failed: no wordless donors"
 
 
-def test_session_respine_verbs(monkeypatch):
+def test_session_respine_verbs(monkeypatch, tmp_path):
     seen = []
 
     async def fake_plan(queue, graph_id, sid, **kw):
@@ -269,8 +269,10 @@ def test_session_respine_verbs(monkeypatch):
     monkeypatch.setattr(session_mod, "resolve_source_node", fake_resolve)
     monkeypatch.setattr(session_mod, "plan_wordless_export", fake_export_plan)
     monkeypatch.setattr(session_mod, "write_wordless_propset", fake_write)
+    from cjm_context_graph_layer.testing import MemGraph
     sess = CorrectionShellSession("/tmp/manifests")
     sess.start()
+    sess.queue, sess.db = MemGraph(), str(tmp_path / "graph.db")  # the opened stack's seat
     try:
         res = sess.transfer_plan("src-1", rendition=None, from_skeleton="legacy",
                                  to_skeleton="sha256:a").result(5)
